@@ -129,6 +129,9 @@
     }
     function keepWithHeading(rows) { var h = boxHeight(rows); if (h < 90) ensure(h + 8); }
 
+    var secN = 0;
+    function nextNum() { secN++; return (secN < 10 ? '0' : '') + secN; }
+
     /* ================= Contenido ================= */
     header();
     y = 42;
@@ -151,12 +154,12 @@
     y += 6;
 
     // 01
-    section('01', 'Descripción de la falla');
+    section(nextNum(), 'Descripción de la falla');
     paragraph(d.descripcion);
     y += 7;
 
     // 02
-    section('02', 'Diagnóstico por componente');
+    section(nextNum(), 'Diagnóstico por componente');
     var comps = (d.componentes || []).map(function (c) { return [c.sistema || '', (c.estado || '').toUpperCase(), c.observacion || '']; });
     if (!comps.length) comps = [['—', '', '']];
     table({
@@ -179,24 +182,50 @@
     });
     y = doc.lastAutoTable.finalY + 10;
 
+    // Evidencia fotográfica (opcional, hasta 2)
+    var fotos = (d.fotos || []).filter(function (f) { return f && f.src; }).slice(0, 2);
+    if (fotos.length) {
+      var gapF = 6, cellW = fotos.length === 1 ? Math.min(120, CW) : (CW - gapF) / 2, maxH = fotos.length === 1 ? 88 : 72;
+      var hasCap = fotos.some(function (f) { return f.caption; });
+      ensure(maxH + 16 + (hasCap ? 8 : 0));
+      section(nextNum(), 'Evidencia fotográfica');
+      var top0 = y, rowH = 0;
+      fotos.forEach(function (f, i) {
+        var ratio = (f.w && f.h) ? f.w / f.h : 4 / 3;
+        var w = cellW, h = w / ratio;
+        if (h > maxH) { h = maxH; w = h * ratio; }
+        var cellX = fotos.length === 1 ? L + (CW - cellW) / 2 : L + i * (cellW + gapF);
+        var x = cellX + (cellW - w) / 2, yy = top0 + (maxH - h) / 2;
+        setFill(C.rowAlt); setDraw(C.line); doc.setLineWidth(0.3); doc.rect(cellX, top0, cellW, maxH, 'FD');
+        var fmtImg = /^data:image\/png/.test(f.src) ? 'PNG' : 'JPEG';
+        try { doc.addImage(f.src, fmtImg, x, yy, w, h, undefined, 'MEDIUM'); } catch (e) {}
+        if (f.caption) {
+          doc.setFont('helvetica', 'italic'); doc.setFontSize(8); setText(C.muted);
+          doc.splitTextToSize(f.caption, cellW - 4).slice(0, 2).forEach(function (ln, k) { doc.text(ln, cellX + cellW / 2, top0 + maxH + 4.5 + k * 3.6, { align: 'center' }); });
+        }
+        rowH = Math.max(rowH, maxH + (f.caption ? 11 : 0));
+      });
+      y = top0 + rowH + 9;
+    }
+
     // 03
     var rows3 = [{ text: d.concIntro || 'Con base en las pruebas realizadas, se concluye lo siguiente:', gap: 3 }];
     (d.conclusiones || []).filter(function (s) { return s && s.trim(); }).forEach(function (s) { rows3.push({ text: s.trim(), bullet: true }); });
     if (d.recomendacion && d.recomendacion.trim()) { rows3[rows3.length - 1].gap = 3.5; rows3.push({ text: d.recomendacion.trim() }); }
-    keepWithHeading(rows3); section('03', 'Conclusión y dictamen');
+    keepWithHeading(rows3); section(nextNum(), 'Conclusión y dictamen');
     box(rows3, C.boxGray, C.boxBorder, { lw: 0.35 });
     y += 2;
 
     // 04
     var rows4 = [{ text: 'Responsable del seguimiento:', style: 'bold' }, { text: d.responsable || '—', gap: d.nota ? 2.5 : 0 }];
     if (d.nota) rows4.push({ text: d.nota, style: 'italic' });
-    keepWithHeading(rows4); section('04', 'Acciones y seguimiento');
+    keepWithHeading(rows4); section(nextNum(), 'Acciones y seguimiento');
     box(rows4, C.white, C.line, { lw: 0.3 });
     y += 2;
 
     // 05
     ensure(62);
-    section('05', 'Firmas de conformidad');
+    section(nextNum(), 'Firmas de conformidad');
     var gap = 7, bw = (CW - gap) / 2, bh = 52, top = y;
     function sig(x, label, img, name, cargo, fecha) {
       setFill(C.rowAlt); setDraw(C.line); doc.setLineWidth(0.3); doc.rect(x, top, bw, bh, 'FD');

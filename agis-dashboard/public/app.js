@@ -51,6 +51,14 @@ const ICON = {
   vdots: I('<circle cx="12" cy="5" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="19" r="1.3" fill="currentColor"/>'),
   link: I('<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/>'),
   unlink: I('<path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1M4 4l16 16"/>'),
+  shield: I('<path d="M12 3 5 6v5c0 4.5 3 8.3 7 10 4-1.7 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/>'),
+  columns: I('<rect x="3.5" y="4" width="17" height="16" rx="2.5"/><path d="M9.5 4v16M14.5 4v16"/>'),
+  camera: I('<path d="M4 8.5A1.5 1.5 0 0 1 5.5 7H8l1.5-2h5L16 7h2.5A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><circle cx="12" cy="13" r="3.5"/>'),
+  logout: I('<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>'),
+  swap: I('<path d="M7 7h12m0 0-3-3m3 3-3 3M17 17H5m0 0 3-3m-3 3 3 3"/>'),
+  lock: I('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  eye: I('<path d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z"/><circle cx="12" cy="12" r="3"/>'),
+  key: I('<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M15 8l2 2"/>'),
   wand: I('<path d="m4 20 10-10M15 4v3M13.5 5.5h3M19 9v2M18 10h2M18 3v1.5M17.25 3.75h1.5"/>')
 };
 
@@ -87,43 +95,112 @@ const pal = k => PALETTE.find(p => p.k === k) || (k && k[0] === '#' ? (PALETTE.f
 const tintStyle = k => { const p = pal(k); return p.bg ? `--pbg:${p.bg};--pbd:${p.bd}` : ''; };
 const COL_DEFAULTS = ['gris', 'azul', 'ambar', 'verde', 'morado', 'turquesa', 'rosa', 'marino'];
 
+/* ================= Sesión / API ================= */
+const ALL_MODS = ['clientes', 'actividades', 'reporte', 'proyectos', 'monitor'];
+const MOD_LABEL = { clientes: 'Clientes', actividades: 'Actividades', reporte: 'Reporte Visita', proyectos: 'Proyectos', monitor: 'Monitor' };
+let ME = null;
+const isAdmin = () => !!ME && ME.role === 'admin';
+const can = m => !!ME && (ME.role === 'admin' || (ME.modules || []).includes(m));
+const ROLE_LABEL = { admin: 'Administrador', colaborador: 'Colaborador' };
+
+/* Solo para la vista previa sin servidor: usuarios en este navegador (sin seguridad real) */
+const LocalAuth = {
+  key: 'agis-local-users', skey: 'agis-local-session',
+  admin: { username: 'admin', name: 'Administrador', role: 'admin', active: true, builtin: true },
+  all() { try { const l = JSON.parse(localStorage.getItem(this.key) || '[]'); return Array.isArray(l) ? l : []; } catch (e) { return this._mem || []; } },
+  saveAll(l) { this._mem = l; try { localStorage.setItem(this.key, JSON.stringify(l)); } catch (e) {} },
+  find(u) { u = String(u || '').trim().toLowerCase(); return u === 'admin' ? this.admin : this.all().find(x => x.username === u); },
+  pub(u) { const { pass, ...r } = u; return { ...r, modules: u.role === 'admin' ? ALL_MODS : (u.modules || []) }; },
+  current() { let s = null; try { s = localStorage.getItem(this.skey); } catch (e) {} if (s === null) s = 'admin'; const u = s && this.find(s); return u && u.active !== false ? this.pub(u) : null; },
+  async login(u, p) {
+    const x = this.find(u);
+    if (!x || x.active === false || (x.builtin ? p !== 'admin' : x.pass !== p)) throw Object.assign(new Error('Usuario o contraseña incorrectos.'), { status: 401 });
+    try { localStorage.setItem(this.skey, x.username); } catch (e) {}
+    return this.pub(x);
+  },
+  async logout() { try { localStorage.setItem(this.skey, ''); } catch (e) {} },
+  async list() { return { users: [this.admin, ...this.all()].map(u => this.pub(u)), modules: ALL_MODS }; },
+  validate(b, isNew) {
+    if (isNew && !/^[a-z0-9._-]{3,32}$/.test(b.username || '')) throw new Error('Usuario: 3 a 32 caracteres (letras, números, punto, guion)');
+    if (isNew && this.find(b.username)) throw new Error('Ese usuario ya existe');
+    if (!String(b.name || '').trim()) throw new Error('Escribe el nombre');
+    if ((isNew || b.password) && String(b.password || '').length < 8) throw new Error('La contraseña debe tener al menos 8 caracteres');
+  },
+  async create(b) { b.username = String(b.username || '').trim().toLowerCase(); this.validate(b, true); const l = this.all(); const u = { username: b.username, name: b.name.trim(), role: b.role, modules: b.modules, active: b.active !== false, pass: b.password, created: new Date().toISOString() }; l.push(u); this.saveAll(l); return this.pub(u); },
+  async update(name, b) { this.validate(b, false); const l = this.all(); const u = l.find(x => x.username === name); if (!u) throw new Error('Usuario no encontrado'); Object.assign(u, { name: b.name.trim(), role: b.role, modules: b.modules, active: b.active !== false, updated: new Date().toISOString() }); if (b.password) u.pass = b.password; this.saveAll(l); return this.pub(u); },
+  async remove(name) { if (ME && name === ME.username) throw new Error('No puedes borrar tu propio usuario'); this.saveAll(this.all().filter(x => x.username !== name)); }
+};
+
+const Api = {
+  mode: 'local',
+  async req(method, url, body) {
+    const opt = { method, credentials: 'same-origin', cache: 'no-store', headers: {} };
+    if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    const r = await fetch(url, opt);
+    const data = (r.headers.get('content-type') || '').includes('json') ? await r.json().catch(() => null) : null;
+    if (r.status === 401 && url !== 'api/login') sessionExpired();
+    if (!r.ok) throw Object.assign(new Error((data && data.error) || `Error ${r.status}`), { status: r.status, data });
+    return data;
+  },
+  async detect() {
+    try {
+      const r = await fetch('api/me', { credentials: 'same-origin', cache: 'no-store' });
+      if (!(r.headers.get('content-type') || '').includes('json')) throw 0;
+      this.mode = 'api';
+      return r.ok ? await r.json() : null;
+    } catch (e) { this.mode = 'local'; return LocalAuth.current(); }
+  },
+  login(u, p) { return this.mode === 'api' ? this.req('POST', 'api/login', { username: u, password: p }) : LocalAuth.login(u, p); },
+  logout() { return this.mode === 'api' ? this.req('POST', 'api/logout', {}).catch(() => {}) : LocalAuth.logout(); },
+  users: {
+    list: () => Api.mode === 'api' ? Api.req('GET', 'api/users') : LocalAuth.list(),
+    create: b => Api.mode === 'api' ? Api.req('POST', 'api/users', b) : LocalAuth.create(b),
+    update: (n, b) => Api.mode === 'api' ? Api.req('PUT', 'api/users/' + encodeURIComponent(n), b) : LocalAuth.update(n, b),
+    remove: n => Api.mode === 'api' ? Api.req('DELETE', 'api/users/' + encodeURIComponent(n)) : LocalAuth.remove(n)
+  },
+  async upload(dataURL) { if (this.mode !== 'api') return dataURL; return (await this.req('POST', 'api/upload', { data: dataURL })).url; }
+};
+let expiredShown = false;
+function sessionExpired() {
+  if (!ME || expiredShown) return;
+  expiredShown = true; ME = null;
+  modalStack.slice().forEach(c => c());
+  showLogin('Tu sesión terminó. Vuelve a iniciar sesión.');
+}
+
 /* ================= Almacenamiento ================= */
 const Store = {
   mode: 'memory',
   data: { clientes: [], board: null, reportes: [], config: null },
   async init() {
-    try {
-      const r = await fetch('api/db', { cache: 'no-store', headers: { Accept: 'application/json' } });
-      const ct = r.headers.get('content-type') || '';
-      if (!r.ok || !ct.includes('json')) throw new Error('sin API');
-      Object.assign(this.data, await r.json());
+    this.data = { clientes: [], board: null, reportes: [], config: null, colPrefs: null };
+    if (Api.mode === 'api') {
+      Object.assign(this.data, await Api.req('GET', 'api/db'));
       this.mode = 'api';
-    } catch (e) {
-      try {
-        const s = localStorage.getItem('agis-db');
-        if (s) Object.assign(this.data, JSON.parse(s));
-        this.mode = 'local';
-      } catch (_) { this.mode = 'memory'; }
+    } else {
+      try { const s = localStorage.getItem('agis-db'); if (s) Object.assign(this.data, JSON.parse(s)); this.mode = 'local'; }
+      catch (_) { this.mode = 'memory'; }
     }
     if (!this.data.config) this.data.config = { equipo: ['Luis Gómez', 'Diego', 'Omar'] };
     if (!Array.isArray(this.data.clientes)) this.data.clientes = [];
     if (!Array.isArray(this.data.reportes)) this.data.reportes = [];
-    if (!this.data.board) { this.data.board = seedBoard(); }
-    if (!this.data.seeded && !this.data.clientes.length) { this.data.clientes = seedClientes(); this.data.seeded = true; this.saveAll(); }
+    if (!this.data.board) { this.data.board = seedBoard(); if (can('actividades')) this.save('board'); }
+    if (!this.data.seeded && !this.data.clientes.length && can('clientes')) { this.data.clientes = seedClientes(); this.data.seeded = true; this.save('clientes'); this.save('seeded'); }
     const b = $('#syncBadge');
     b.className = 'sync ' + this.mode;
-    b.textContent = this.mode === 'api' ? 'Servidor' : this.mode === 'local' ? 'Local' : 'Sin guardar';
+    b.textContent = this.mode === 'api' ? 'Servidor' : this.mode === 'local' ? 'Vista previa' : 'Sin guardar';
     b.title = this.mode === 'api' ? 'Datos guardados en el servidor' : this.mode === 'local' ? 'Datos guardados solo en este navegador' : 'Los datos se pierden al cerrar';
   },
   save(key) {
+    const need = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte' }[key];
+    if (need && !can(need)) return;
     if (this.mode === 'api') {
-      fetch('api/db/' + key, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(this.data[key]) })
-        .then(r => { if (!r.ok) throw 0; }).catch(() => toast('No se pudo guardar en el servidor', true));
+      Api.req('PUT', 'api/db/' + key, this.data[key]).catch(e => { if (e.status !== 401) toast(e.status === 403 ? 'Sin permiso para guardar en este módulo' : 'No se pudo guardar en el servidor', true); });
     } else if (this.mode === 'local') {
       try { localStorage.setItem('agis-db', JSON.stringify(this.data)); } catch (e) { toast('Almacenamiento local lleno', true); }
     }
   },
-  saveAll() { ['clientes', 'board', 'reportes', 'config', 'seeded'].forEach(k => this.save(k)); }
+  saveAll() { ['clientes', 'board', 'reportes', 'config', 'seeded', 'colPrefs'].forEach(k => this.save(k)); }
 };
 
 function seedBoard() {
@@ -220,6 +297,7 @@ function popMenu(anchor, items) {
   const m = document.createElement('div'); m.className = 'popmenu';
   items.forEach(it => {
     if (it === '-') { m.appendChild(document.createElement('hr')); return; }
+    if (it.header) { const h = document.createElement('div'); h.className = 'pm-head'; h.innerHTML = it.header; m.appendChild(h); return; }
     const b = document.createElement('button');
     b.innerHTML = (it.icon ? ICON[it.icon] : '') + esc(it.label);
     if (it.danger) b.className = 'danger';
@@ -251,15 +329,18 @@ const MODULES = [
   { k: 'actividades', t: 'Actividades', s: 'Equipo en campo', icon: 'kanban', hue: 'h-teal', render: renderActividades },
   { k: 'reporte', t: 'Reporte Visita', s: 'Genera PDF firmado', icon: 'report', hue: 'h-amber', render: renderReporte },
   { k: 'proyectos', t: 'Proyectos', s: 'Próximamente', icon: 'folder', hue: 'h-slate', soon: true },
-  { k: 'monitor', t: 'Monitor', s: 'Próximamente', icon: 'pulse', hue: 'h-rose', soon: true }
+  { k: 'monitor', t: 'Monitor', s: 'Próximamente', icon: 'pulse', hue: 'h-rose', soon: true },
+  { k: 'usuarios', t: 'Usuarios', s: 'Accesos y perfiles', icon: 'shield', hue: 'h-navy', adminOnly: true, render: renderUsuarios }
 ];
+const allowed = m => m.adminOnly ? isAdmin() : can(m.k);
 let current = null;
 function buildBand() {
-  $('#bandInner').innerHTML = MODULES.map((m, i) => `
+  $('#bandInner').innerHTML = MODULES.filter(allowed).map((m, i) => `
     <button class="fbtn ${m.hue} ${m.soon ? 'soon' : ''}" data-mod="${m.k}" style="--i:${i}" ${m.soon ? 'aria-disabled="true"' : ''}>
       <span class="ico">${ICON[m.icon]}</span>
       <span>${esc(m.t)}<small>${esc(m.s)}</small></span>
     </button>`).join('');
+  if (window._bandBound) return; window._bandBound = true;
   $('#bandInner').addEventListener('click', e => {
     const b = e.target.closest('.fbtn'); if (!b) return;
     const m = MODULES.find(x => x.k === b.dataset.mod);
@@ -278,7 +359,10 @@ function setMenuMode() {
   b.setAttribute('aria-label', current ? 'Cerrar sección' : 'Abrir menú');
 }
 function go(k, opts = {}) {
-  const m = MODULES.find(x => x.k === k && !x.soon);
+  if (!ME) return;
+  let m = MODULES.find(x => x.k === k && !x.soon);
+  if (m && !allowed(m)) { toast('No tienes acceso a ese módulo', true); m = null; }
+  $('#stage').classList.toggle('wide', !!m && m.k === 'actividades');
   if (popClose) popClose();
   if (!m) {
     current = null; setBand(false); setMenuMode();
@@ -311,16 +395,16 @@ function searchIndex(q) {
   if (!terms.length) return [];
   const hit = hay => { const h = norm(hay); return terms.every(t => h.includes(t)); };
   const out = [];
-  Store.data.clientes.forEach(c => {
+  if (can('clientes')) Store.data.clientes.forEach(c => {
     if (hit([c.nombre, c.id, c.contacto, c.origen, c.email, c.telefono, c.direccion, (c.servicios || []).join(' ')].join(' ')))
       out.push({ type: 'cliente', id: c.id, title: c.nombre, sub: `${c.id} · ${ESTATUS.find(s => s.k === c.estatus)?.l || ''}${+c.saldo > 0 ? ' · Saldo ' + MXN.format(c.saldo) : ''}` });
   });
-  Store.data.board.columns.forEach(col => col.cards.forEach(k => {
+  if (can('actividades')) Store.data.board.columns.forEach(col => col.cards.forEach(k => {
     const cn = clientName(k.clienteId) || k.clienteTxt;
     if (hit([k.title, cn, k.tipo, (k.responsables || []).join(' '), k.direccion, k.notas, col.name].join(' ')))
       out.push({ type: 'actividad', id: k.id, title: k.title, sub: [col.name, k.tipo, cn, k.fecha ? fmtDate(k.fecha) : ''].filter(Boolean).join(' · ') });
   }));
-  Store.data.reportes.forEach(r => {
+  if (can('reporte')) Store.data.reportes.forEach(r => {
     if (hit([r.folio, r.codigo, r.asunto, r.tipo, r.data?.descripcion].join(' ')))
       out.push({ type: 'reporte', id: r.id, title: `${r.folio || 'Sin folio'} — ${r.asunto || r.tipo}`, sub: `${fmtDate(r.fecha)} · ${r.codigo || ''}` });
   });
@@ -382,6 +466,35 @@ function openResult(it) {
 }
 
 /* ================= CLIENTES ================= */
+const statusPill = k => `<span class="spill sp-${esc(k)}"><i class="sdot s-${esc(k)}"></i>${esc(ESTATUS.find(s => s.k === k)?.l || 'Sin estatus')}</span>`;
+const svcChips = c => `<div class="chips">${(c.servicios || []).map(s => `<span class="chip ${svcClass(s)}">${esc(s)}</span>`).join('') || '<span class="meta-line">—</span>'}</div>`;
+const CLIENT_COLS = [
+  { k: 'id', l: 'ID', sort: true, w: 110, render: c => `<span class="mono">${esc(c.id)}</span>` },
+  { k: 'estatus', l: 'Estatus', sort: true, w: 140, render: c => statusPill(c.estatus) },
+  { k: 'creado', l: 'Creado el', sort: true, def: true, w: 120, render: c => fmtDate(c.creado) },
+  { k: 'modificado', l: 'Última modificación', sort: true, def: true, w: 150, render: c => fmtDate(c.modificado) },
+  { k: 'origen', l: 'Origen', sort: true, def: true, w: 150, render: c => esc(c.origen || '—') },
+  { k: 'contacto', l: 'Contacto principal', sort: true, w: 160, render: c => esc(c.contacto || '—') },
+  { k: 'telefono', l: 'Teléfono', w: 130, render: c => esc(c.telefono || '—') },
+  { k: 'email', l: 'Correo', sort: true, w: 190, render: c => esc(c.email || '—') },
+  { k: 'direccion', l: 'Dirección', w: 220, render: c => `<span class="clip">${esc(c.direccion || '—')}</span>` },
+  { k: 'servicios', l: 'Servicios contratados', def: true, w: 240, cls: () => 'svc', render: svcChips },
+  { k: 'saldo', l: 'Saldo pendiente', sort: true, def: true, right: true, w: 140, cls: c => 'money ' + (+c.saldo > 0 ? '' : 'zero'), render: c => MXN.format(+c.saldo || 0) },
+  { k: 'notas', l: 'Notas', w: 220, render: c => `<span class="clip">${esc(c.notas || '—')}</span>` }
+];
+function visibleCols() {
+  const pref = Store.data.colPrefs && Array.isArray(Store.data.colPrefs.clientes) ? Store.data.colPrefs.clientes : CLIENT_COLS.filter(c => c.def).map(c => c.k);
+  return CLIENT_COLS.filter(c => pref.includes(c.k));
+}
+function setVisibleCols(keys) {
+  Store.data.colPrefs = { ...(Store.data.colPrefs || {}), clientes: CLIENT_COLS.map(c => c.k).filter(k => keys.includes(k)) };
+  Store.save('colPrefs');
+}
+function drawColChecks() {
+  const vis = visibleCols().map(c => c.k);
+  $('#colChecks').innerHTML = `<label class="colcheck fixed"><input type="checkbox" checked disabled> Nombre y estatus</label>` +
+    CLIENT_COLS.map(c => `<label class="colcheck"><input type="checkbox" value="${c.k}" ${vis.includes(c.k) ? 'checked' : ''}> ${esc(c.l)}</label>`).join('');
+}
 const CS = { tab: 'all', q: '', from: '', to: '', origen: '', servicio: '', saldo: false, page: 1, sel: new Set(), sort: 'creado', dir: -1, showFilters: false, showDates: false };
 const PAGE = 10;
 
@@ -431,6 +544,14 @@ function renderClientes(stage) {
       <span class="spacer"></span>
       <span id="demoNote"></span>
       <div class="pop-anchor">
+        <button class="btn" data-act="cols">${ICON.columns}Columnas</button>
+        <div class="dropdown hidden" id="colsDd">
+          <h4>Columnas visibles</h4>
+          <div class="colchecks" id="colChecks"></div>
+          <div style="display:flex;justify-content:space-between;gap:8px;margin-top:12px"><button class="btn sm ghost" data-act="colreset">Restablecer</button><button class="btn sm primary" data-act="colclose">Listo</button></div>
+        </div>
+      </div>
+      <div class="pop-anchor">
         <button class="btn" data-act="dates">${ICON.cal}<span id="dateLbl"></span></button>
         <div class="dropdown hidden" id="dateDd">
           <h4>Rango de fechas de creación</h4>
@@ -462,16 +583,7 @@ function renderClientes(stage) {
     </div>
     <div id="bulk"></div>
     <div class="table-wrap"><div class="table-scroll"><table class="dt">
-      <thead><tr>
-        <th class="ck"><input type="checkbox" id="ckAll" aria-label="Seleccionar todos"></th>
-        <th class="sortable" data-sort="nombre">Nombre<span class="arr"></span></th>
-        <th class="sortable" data-sort="creado">Creado el<span class="arr"></span></th>
-        <th class="sortable" data-sort="modificado">Última modificación<span class="arr"></span></th>
-        <th class="sortable" data-sort="origen">Origen<span class="arr"></span></th>
-        <th>Servicios contratados</th>
-        <th class="sortable r" data-sort="saldo">Saldo pendiente<span class="arr"></span></th>
-        <th style="width:44px"></th>
-      </tr></thead>
+      <thead id="cHead"></thead>
       <tbody id="cBody"></tbody>
     </table></div><div class="pager" id="cPager"></div></div>
   </section>`;
@@ -485,18 +597,25 @@ function renderClientes(stage) {
   $('#fSaldo').onchange = e => { CS.saldo = e.target.checked; CS.page = 1; refreshClientes(); };
   $('#dFrom').onchange = e => { CS.from = e.target.value; CS.page = 1; refreshClientes(); };
   $('#dTo').onchange = e => { CS.to = e.target.value; CS.page = 1; refreshClientes(); };
-  $('#ckAll').onchange = e => {
+  root.addEventListener('change', e => {
+    if (e.target.id !== 'ckAll') return;
     const ids = pageSlice(clientFiltered()).map(c => c.id);
     ids.forEach(id => e.target.checked ? CS.sel.add(id) : CS.sel.delete(id));
     refreshClientes();
-  };
+  });
 
   root.addEventListener('click', e => {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (act === 'new') return clientForm();
     if (act === 'export') return exportClientes();
-    if (act === 'dates') { $('#dateDd').classList.toggle('hidden'); $('#filterDd').classList.add('hidden'); return; }
-    if (act === 'filters') { $('#filterDd').classList.toggle('hidden'); $('#dateDd').classList.add('hidden'); return; }
+    if (act === 'dates' || act === 'filters' || act === 'cols') {
+      const id = { dates: 'dateDd', filters: 'filterDd', cols: 'colsDd' }[act];
+      ['dateDd', 'filterDd', 'colsDd'].forEach(d => { if (d !== id) $('#' + d).classList.add('hidden'); });
+      if (act === 'cols') drawColChecks();
+      $('#' + id).classList.toggle('hidden'); return;
+    }
+    if (act === 'colclose') { $('#colsDd').classList.add('hidden'); return; }
+    if (act === 'colreset') { setVisibleCols(CLIENT_COLS.filter(c => c.def).map(c => c.k)); drawColChecks(); refreshClientes(); return; }
     if (act === 'fclose') { $('#filterDd').classList.add('hidden'); return; }
     if (act === 'fclear') { CS.origen = CS.servicio = ''; CS.saldo = false; $('#fOrigen').value = ''; $('#fServ').value = ''; $('#fSaldo').checked = false; CS.page = 1; refreshClientes(); return; }
     if (act === 'bulk-del') return bulkDelete();
@@ -534,6 +653,9 @@ function renderClientes(stage) {
     if (tr) clientForm(Store.data.clientes.find(x => x.id === tr.dataset.id));
   });
   root.addEventListener('change', e => {
+    if (e.target.closest('#colChecks')) {
+      setVisibleCols($$('#colChecks input:checked').map(i => i.value)); refreshClientes(); return;
+    }
     const ck = e.target.closest('tr[data-id] input[type=checkbox]');
     if (ck) { const id = ck.closest('tr').dataset.id; ck.checked ? CS.sel.add(id) : CS.sel.delete(id); refreshClientes(); }
   });
@@ -557,6 +679,12 @@ function refreshClientes() {
   $('#fCount').innerHTML = fc ? `<span class="dot-count">${fc}</span>` : '';
   const hasDemo = Store.data.clientes.some(c => c.demo) || Store.data.board.columns.some(col => col.cards.some(k => k.demo));
   $('#demoNote').innerHTML = hasDemo ? `<span class="demo-note">Datos de ejemplo <button class="btn sm ghost" data-act="clear-demo">Limpiar</button></span>` : '';
+  const cols = visibleCols();
+  $('#cHead').innerHTML = `<tr><th class="ck"><input type="checkbox" id="ckAll" aria-label="Seleccionar todos"></th>
+    <th class="sortable" data-sort="nombre">Nombre<span class="arr"></span></th>
+    ${cols.map(c => `<th class="${c.sort ? 'sortable' : ''} ${c.right ? 'r' : ''}" ${c.sort ? `data-sort="${c.k}"` : ''}>${esc(c.l)}${c.sort ? '<span class="arr"></span>' : ''}</th>`).join('')}
+    <th style="width:44px"></th></tr>`;
+  $('#clientes table.dt').style.minWidth = Math.max(640, 320 + cols.reduce((a, c) => a + (c.w || 150), 0)) + 'px';
   $$('#clientes th[data-sort]').forEach(th => {
     const on = th.dataset.sort === CS.sort; th.classList.toggle('sorted', on);
     th.querySelector('.arr').textContent = on ? (CS.dir > 0 ? '↑' : '↓') : '↕';
@@ -566,19 +694,14 @@ function refreshClientes() {
   const pages = Math.max(1, Math.ceil(list.length / PAGE));
   if (CS.page > pages) CS.page = pages;
   const rows = pageSlice(list);
-  const est = k => ESTATUS.find(s => s.k === k)?.l || '';
   $('#cBody').innerHTML = rows.length ? rows.map(c => `
     <tr data-id="${esc(c.id)}" class="${CS.sel.has(c.id) ? 'sel' : ''}">
       <td class="ck"><input type="checkbox" ${CS.sel.has(c.id) ? 'checked' : ''} aria-label="Seleccionar"></td>
-      <td><div class="cname"><b>${esc(c.nombre)}</b><small><span class="sdot s-${c.estatus}" title="${esc(est(c.estatus))}"></span>${esc(c.id)}</small></div></td>
-      <td data-l="Creado el">${fmtDate(c.creado)}</td>
-      <td data-l="Última modificación">${fmtDate(c.modificado)}</td>
-      <td data-l="Origen">${esc(c.origen || '—')}</td>
-      <td data-l="Servicios" class="svc"><div class="chips">${(c.servicios || []).map(s => `<span class="chip ${svcClass(s)}">${esc(s)}</span>`).join('') || '<span class="meta-line">—</span>'}</div></td>
-      <td data-l="Saldo pendiente" class="money ${+c.saldo > 0 ? '' : 'zero'}">${MXN.format(+c.saldo || 0)}</td>
+      <td><div class="cname"><b>${esc(c.nombre)}</b><small>${statusPill(c.estatus)}</small></div></td>
+      ${cols.map(col => `<td data-l="${esc(col.l)}" class="${col.cls ? col.cls(c) : ''}">${col.render(c)}</td>`).join('')}
       <td class="act"><button class="icon-btn" data-more="${esc(c.id)}" aria-label="Acciones">${ICON.more}</button></td>
     </tr>`).join('')
-    : `<tr><td colspan="8"><div class="empty">${ICON.inbox}<b>Sin resultados</b>${Store.data.clientes.length ? 'Ajusta la búsqueda o los filtros.' : 'Registra tu primer cliente con “Crear nuevo”.'}</div></td></tr>`;
+    : `<tr><td colspan="${cols.length + 3}"><div class="empty">${ICON.inbox}<b>Sin resultados</b>${Store.data.clientes.length ? 'Ajusta la búsqueda o los filtros.' : 'Registra tu primer cliente con “Crear nuevo”.'}</div></td></tr>`;
 
   const ids = rows.map(c => c.id);
   const ckAll = $('#ckAll');
@@ -608,9 +731,10 @@ function clientForm(c, isCopy) {
   openModal({
     title: isNew ? 'Nuevo cliente' : 'Editar cliente', size: 'wide',
     body: `
-      ${!isNew ? `<div class="meta-line">ID <b>${esc(c.id)}</b> · Creado ${fmtDate(c.creado)} · Modificado ${fmtDate(c.modificado)}</div>` : `<div class="meta-line">Se asignará el ID <b>${nextClientId()}</b> al guardar.</div>`}
+      ${!isNew ? `<div class="meta-line">Creado ${fmtDate(c.creado)} · Modificado ${fmtDate(c.modificado)}</div>` : ''}
       <div class="grid2">
-        <div class="field span2"><label>Nombre / Proyecto <span class="req">*</span></label><input class="input" name="nombre" value="${esc(c.nombre)}" placeholder="Ej. Residencia Bosques de las Lomas" autofocus></div>
+        <div class="field"><label>ID del cliente <span class="req">*</span></label><input class="input mono" name="cid" value="${esc(isNew ? nextClientId() : c.id)}" maxlength="30" autocapitalize="characters" spellcheck="false"><small class="meta-line">${isNew ? 'Generado con la fecha de hoy (ddmmaa-##); puedes cambiarlo.' : 'Puedes editarlo; se actualiza en actividades y reportes.'}</small></div>
+        <div class="field"><label>Nombre / Proyecto <span class="req">*</span></label><input class="input" name="nombre" value="${esc(c.nombre)}" placeholder="Ej. Residencia Bosques de las Lomas" autofocus></div>
         <div class="field"><label>Estatus</label><select class="input" name="estatus">${ESTATUS.map(s => `<option value="${s.k}" ${c.estatus === s.k ? 'selected' : ''}>${s.l}</option>`).join('')}</select></div>
         <div class="field"><label>Origen</label><select class="input" name="origen"><option value="">Seleccionar…</option>${ORIGENES.map(o => `<option ${c.origen === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>
         <div class="field"><label>Contacto principal</label><input class="input" name="contacto" value="${esc(c.contacto)}" placeholder="Nombre de quien atiende"></div>
@@ -629,18 +753,33 @@ function clientForm(c, isCopy) {
         const f = n => m.querySelector(`[name=${n}]`);
         const nombre = f('nombre').value.trim();
         if (!nombre) { f('nombre').classList.add('invalid'); f('nombre').focus(); return; }
+        const cid = f('cid').value.trim();
+        if (!cid) { f('cid').classList.add('invalid'); f('cid').focus(); toast('El ID no puede quedar vacío', true); return; }
+        if (Store.data.clientes.some(x => x.id.toLowerCase() === cid.toLowerCase() && (isNew || x.id !== c.id))) { f('cid').classList.add('invalid'); f('cid').focus(); toast(`El ID ${cid} ya está asignado a otro cliente`, true); return; }
         const now = new Date().toISOString();
         const rec = {
           nombre, estatus: f('estatus').value, origen: f('origen').value, contacto: f('contacto').value.trim(),
           telefono: f('telefono').value.trim(), email: f('email').value.trim(), saldo: Math.max(0, parseFloat(f('saldo').value) || 0),
           direccion: f('direccion').value.trim(), servicios: SERVICIOS.filter(s => sel.has(s)), notas: f('notas').value.trim(), modificado: now
         };
-        if (isNew) { Store.data.clientes.unshift({ id: nextClientId(), creado: now, ...rec }); toast('Cliente registrado'); }
-        else { const i = Store.data.clientes.findIndex(x => x.id === c.id); Store.data.clientes[i] = { ...Store.data.clientes[i], ...rec, demo: false }; toast('Cambios guardados'); }
+        if (isNew) { Store.data.clientes.unshift({ id: cid, creado: now, ...rec }); toast('Cliente registrado'); }
+        else {
+          const i = Store.data.clientes.findIndex(x => x.id === c.id);
+          Store.data.clientes[i] = { ...Store.data.clientes[i], ...rec, id: cid, demo: false };
+          if (cid !== c.id) renameClientRefs(c.id, cid);
+          toast('Cambios guardados');
+        }
         Store.save('clientes'); close(); refreshClientes();
       };
     }
   });
+}
+function renameClientRefs(oldId, newId) {
+  let b = false, r = false;
+  Store.data.board.columns.forEach(col => col.cards.forEach(k => { if (k.clienteId === oldId) { k.clienteId = newId; b = true; } }));
+  Store.data.reportes.forEach(x => { if (x.data && x.data.clienteId === oldId) { x.data.clienteId = newId; r = true; } });
+  if (CS.sel.delete(oldId)) CS.sel.add(newId);
+  if (b) Store.save('board'); if (r) Store.save('reportes');
 }
 async function deleteClient(c) {
   if (!await confirmDialog('Eliminar cliente', `¿Eliminar <b>${esc(c.nombre)}</b> (${esc(c.id)})? Esta acción no se puede deshacer.`)) return;
@@ -884,12 +1023,12 @@ function cardForm(k, colId) {
     const avail = Store.data.reportes.filter(r => !k.reportIds.includes(r.id));
     return `<div class="replinks">${linked.map(r => `
       <div class="replink"><span class="ri">${ICON.pdf}</span><span class="rt"><b>${esc(r.folio || 'Sin folio')}</b><small>${fmtDate(r.fecha)} · ${esc(r.asunto || r.tipo)}</small></span>
-        <button type="button" class="icon-btn" data-ropen="${r.id}" title="Abrir reporte">${ICON.open}</button>
-        <button type="button" class="icon-btn" data-rdl="${r.id}" title="Descargar PDF">${ICON.download}</button>
+        ${can('reporte') ? `<button type="button" class="icon-btn" data-ropen="${r.id}" title="Abrir reporte">${ICON.open}</button>
+        <button type="button" class="icon-btn" data-rdl="${r.id}" title="Descargar PDF">${ICON.download}</button>` : ''}
         <button type="button" class="icon-btn danger" data-runlink="${r.id}" title="Desvincular">${ICON.unlink}</button></div>`).join('') || '<span class="meta-line">Sin reportes vinculados.</span>'}</div>
       <div class="replink-add">
         <select class="input" id="repSel"><option value="">${avail.length ? 'Vincular reporte existente…' : 'No hay otros reportes guardados'}</option>${avail.map(r => `<option value="${r.id}">${esc(r.folio || 'Sin folio')} · ${fmtDate(r.fecha)} · ${esc(r.codigo || r.asunto || '')}</option>`).join('')}</select>
-        <button type="button" class="btn" data-newrep>${ICON.plus}Crear reporte</button>
+        ${can('reporte') ? `<button type="button" class="btn" data-newrep>${ICON.plus}Crear reporte</button>` : ''}
       </div>`;
   };
   openModal({
@@ -1017,7 +1156,7 @@ function newReport() {
     concIntro: 'Con base en las pruebas realizadas, se concluye lo siguiente:', conclusiones: [''], recomendacion: '',
     responsable: '', nota: 'Arquitechtura AGIS queda a disposición para generar propuesta de Póliza de Mantenimiento de Sistemas Especiales.',
     prestNombre: 'Ing. Luis Gómez', prestCargo: 'Gerente de Integraciones – Arquitechtura AGIS', prestFecha: todayISO(), prestFirma: '',
-    recNombre: '', recCargo: '', recFecha: todayISO(), recFirma: '', savedId: null, cardId: null
+    recNombre: '', recCargo: '', recFecha: todayISO(), recFirma: '', savedId: null, cardId: null, fotos: []
   };
 }
 let R = null;
@@ -1070,7 +1209,13 @@ function renderReporte(stage) {
       </div>
 
       <div class="card">
-        <div class="sec-h"><span class="n">03</span><h2>Conclusión y dictamen</h2></div>
+        <div class="sec-h"><span class="n">03</span><h2>Evidencia fotográfica</h2><span class="meta-line">Hasta 2 imágenes</span></div>
+        <div class="fotos" id="fotos"></div>
+        <input type="file" id="fotoInput" accept="image/*" hidden>
+      </div>
+
+      <div class="card">
+        <div class="sec-h"><span class="n">04</span><h2>Conclusión y dictamen</h2></div>
         <div style="display:flex;flex-direction:column;gap:14px">
           <div class="field"><label>Introducción</label><input class="input" data-f="concIntro"></div>
           <div class="field"><label>Conclusiones</label><div class="bullets" id="bullets"></div>
@@ -1080,7 +1225,7 @@ function renderReporte(stage) {
       </div>
 
       <div class="card">
-        <div class="sec-h"><span class="n">04</span><h2>Acciones y seguimiento</h2></div>
+        <div class="sec-h"><span class="n">05</span><h2>Acciones y seguimiento</h2></div>
         <div class="grid2">
           <div class="field span2"><label>Responsable del seguimiento</label><input class="input" data-f="responsable" placeholder="Ej. Equipo de TI del cliente"></div>
           <div class="field span2"><label>Nota de Arquitechtura</label><textarea class="input" data-f="nota" rows="2"></textarea></div>
@@ -1088,7 +1233,7 @@ function renderReporte(stage) {
       </div>
 
       <div class="card">
-        <div class="sec-h"><span class="n">05</span><h2>Firmas de conformidad</h2></div>
+        <div class="sec-h"><span class="n">06</span><h2>Firmas de conformidad</h2></div>
         <div class="sig-grid">
           <div class="sig-box">
             <h4>PRESTADOR DE SERVICIO</h4>
@@ -1131,6 +1276,8 @@ function renderReporte(stage) {
   root.addEventListener('input', e => {
     const f = e.target.dataset.f;
     if (f) { R[f] = e.target.value; e.target.classList.remove('invalid'); if (f === 'codigo') { const c = Store.data.clientes.find(x => x.nombre === e.target.value); R.clienteId = c?.id || ''; } saveDraft(); updateProgress(); }
+    const fc = e.target.dataset.fc;
+    if (fc !== undefined && R.fotos[+fc]) { R.fotos[+fc].caption = e.target.value; saveDraft(); }
     const bi = e.target.dataset.bi;
     if (bi !== undefined) { R.conclusiones[+bi] = e.target.value; saveDraft(); updateProgress(); }
   });
@@ -1139,6 +1286,8 @@ function renderReporte(stage) {
     const a = e.target.closest('[data-act]')?.dataset.act;
     if (a === 'folio') { R.folio = suggestFolio(); $('[data-f=folio]').value = R.folio; saveDraft(); return; }
     if (a === 'addcomp') return compForm();
+    if (a === 'addfoto') { $('#fotoInput').click(); return; }
+    const fd = e.target.closest('[data-fdel]'); if (fd) { R.fotos.splice(+fd.dataset.fdel, 1); drawFotos(); saveDraft(); return; }
     if (a === 'addbul') { R.conclusiones.push(''); drawBullets(); $$('#bullets textarea').pop().focus(); saveDraft(); return; }
     if (a === 'pdf') return generatePDF();
     if (a === 'save') return saveReport(true);
@@ -1151,7 +1300,21 @@ function renderReporte(stage) {
     const ro = e.target.closest('[data-ropen]'); if (ro) return openSaved(ro.dataset.ropen);
     const rm = e.target.closest('[data-rmore]'); if (rm) return savedMenu(rm);
   });
-  drawComps(); drawBullets(); drawSaved();
+  if (!Array.isArray(R.fotos)) R.fotos = [];
+  $('#fotoInput').addEventListener('change', async e => {
+    const file = e.target.files && e.target.files[0]; e.target.value = '';
+    if (!file) return;
+    if (R.fotos.length >= 2) return toast('Máximo 2 imágenes por reporte', true);
+    const slot = $('.foto-add'); if (slot) { slot.disabled = true; slot.querySelector('b').textContent = 'Procesando…'; }
+    try {
+      const img = await processImage(file);
+      const src = await Api.upload(img.data);
+      R.fotos.push({ src, w: img.w, h: img.h, caption: '' });
+      saveDraft(); toast('Foto agregada');
+    } catch (err) { console.error(err); toast(err.message && err.status ? err.message : 'No se pudo leer la imagen (usa JPG o PNG)', true); }
+    drawFotos();
+  });
+  drawComps(); drawBullets(); drawSaved(); drawFotos();
   pads = {};
   $$('.sig-pad', root).forEach(el => { pads[el.dataset.sig] = signaturePad(el, el.dataset.sig); });
   updateProgress();
@@ -1172,6 +1335,39 @@ function drawComps() {
     </div>`).join('')
     : `<div class="empty" style="padding:28px">${ICON.report}<b>Sin componentes</b>Agrega cada sistema o componente revisado con su estado y hallazgo.</div>`;
   updateProgress();
+}
+function drawFotos() {
+  const el = $('#fotos'); if (!el) return;
+  let html = R.fotos.map((f, i) => `
+    <figure class="foto">
+      <div class="foto-img"><img src="${esc(f.src)}" alt="Evidencia ${i + 1}"><button class="icon-btn danger foto-del" data-fdel="${i}" title="Quitar foto">${ICON.trash}</button></div>
+      <input class="input" data-fc="${i}" value="${esc(f.caption || '')}" placeholder="Descripción de la foto (opcional)" maxlength="140">
+    </figure>`).join('');
+  if (R.fotos.length < 2) html += `<button class="foto-add" data-act="addfoto">${ICON.camera}<b>Agregar foto</b><small>Toma una foto o elige de la galería</small></button>`;
+  el.innerHTML = html;
+}
+async function processImage(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('formato')); i.src = url; });
+    const max = 1600, sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.round(img.naturalWidth * sc), h = Math.round(img.naturalHeight * sc);
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+    return { data: cv.toDataURL('image/jpeg', 0.82), w, h };
+  } finally { URL.revokeObjectURL(url); }
+}
+async function srcToDataURL(src) {
+  if (!src || src.startsWith('data:')) return src;
+  const r = await fetch(src, { credentials: 'same-origin' });
+  if (!r.ok) throw new Error('No se pudo cargar una de las fotos');
+  const b = await r.blob();
+  return await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b); });
+}
+async function makePDF(d) {
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('No se pudo cargar el generador de PDF (revisa la conexión)');
+  const fotos = await Promise.all((d.fotos || []).map(async f => ({ ...f, src: await srcToDataURL(f.src) })));
+  return buildReportPDF({ ...d, fotos }, { jsPDF: window.jspdf.jsPDF, logos: window.AGIS_LOGOS });
 }
 function drawBullets() {
   $('#bullets').innerHTML = R.conclusiones.map((t, i) => `
@@ -1290,18 +1486,17 @@ function saveReport(notify) {
   }
   if (notify) toast('Reporte guardado');
 }
-function generatePDF() {
+async function generatePDF() {
   if (!validateReport()) return;
-  if (!window.jspdf || !window.jspdf.jsPDF) { toast('No se pudo cargar el generador de PDF (revisa la conexión)', true); return; }
   if (!R.recFirma && !R._warned) { R._warned = true; toast('Aviso: falta la firma de quien recibe. Vuelve a pulsar para generar así.'); return; }
   delete R._warned;
   saveReport(false);
   try {
-    const doc = buildReportPDF(R, { jsPDF: window.jspdf.jsPDF, logos: window.AGIS_LOGOS });
+    const doc = await makePDF(R);
     const name = `${(R.folio || 'Reporte').replace(/[^\w\-]+/g, '_')}.pdf`;
     doc.save(name);
     toast('PDF generado: ' + name);
-  } catch (err) { console.error(err); toast('Error al generar el PDF', true); }
+  } catch (err) { console.error(err); toast(err.message || 'Error al generar el PDF', true); }
 }
 async function resetReport() {
   if (!await confirmDialog('Nuevo reporte', 'Se limpiará el formulario actual. Si no lo guardaste, se perderá.', 'Limpiar', false)) return;
@@ -1323,11 +1518,10 @@ function openReport(id) {
   if (current === 'reporte') renderReporte($('#stage')); else go('reporte');
   toast('Reporte abierto: ' + (r.folio || ''));
 }
-function downloadReport(id) {
-  const r = Store.data.reportes.find(x => x.id === id); if (!r) return;
-  if (!window.jspdf) return toast('No se pudo cargar el generador de PDF', true);
-  try { buildReportPDF(r.data, { jsPDF: window.jspdf.jsPDF, logos: window.AGIS_LOGOS }).save(`${(r.folio || 'Reporte').replace(/[^\w\-]+/g, '_')}.pdf`); toast('Descargando ' + (r.folio || 'reporte')); }
-  catch (e) { console.error(e); toast('Error al generar el PDF', true); }
+async function downloadReport(id) {
+  const r = Store.data.reportes.find(x => x.id === id); if (!r || !r.data) return;
+  try { (await makePDF(r.data)).save(`${(r.folio || 'Reporte').replace(/[^\w\-]+/g, '_')}.pdf`); toast('Descargando ' + (r.folio || 'reporte')); }
+  catch (e) { console.error(e); toast(e.message || 'Error al generar el PDF', true); }
 }
 function linkedCardChip() {
   if (!R.cardId) return '';
@@ -1340,24 +1534,211 @@ function savedMenu(btn) {
   popMenu(btn, [
     { label: 'Abrir / editar', icon: 'open', run: () => openSaved(id) },
     { label: 'Descargar PDF', icon: 'download', run: () => downloadReport(id) },
-    { label: 'Duplicar como nuevo', icon: 'copy', run: () => { R = { ...newReport(), ...r.data, savedId: null, cardId: null, folio: '', prestFirma: '', recFirma: '', fecha: todayISO(), prestFecha: todayISO(), recFecha: todayISO() }; saveDraft(); renderReporte($('#stage')); } },
+    { label: 'Duplicar como nuevo', icon: 'copy', run: () => { R = { ...newReport(), ...r.data, savedId: null, cardId: null, fotos: [], folio: '', prestFirma: '', recFirma: '', fecha: todayISO(), prestFecha: todayISO(), recFecha: todayISO() }; saveDraft(); renderReporte($('#stage')); } },
     '-',
     { label: 'Eliminar', icon: 'trash', danger: true, run: async () => { if (!await confirmDialog('Eliminar reporte', `¿Eliminar el reporte <b>${esc(r.folio)}</b>?`)) return; Store.data.reportes = Store.data.reportes.filter(x => x.id !== id); if (R.savedId === id) R.savedId = null; Store.data.board.columns.forEach(c => c.cards.forEach(k => { if (k.reportIds) k.reportIds = k.reportIds.filter(x => x !== id); })); Store.save('reportes'); Store.save('board'); drawSaved(); } }
   ]);
 }
 
+/* ================= USUARIOS (solo admin) ================= */
+const MOD_INFO = [
+  { k: 'clientes', icon: 'users', d: 'Cartera, saldos y datos de contacto' },
+  { k: 'actividades', icon: 'kanban', d: 'Tablero del equipo en campo' },
+  { k: 'reporte', icon: 'report', d: 'Formularios y PDF de visita' },
+  { k: 'proyectos', icon: 'folder', d: 'Próximamente' },
+  { k: 'monitor', icon: 'pulse', d: 'Próximamente' }
+];
+const PRESETS = [
+  { l: 'Técnico de campo', m: ['actividades', 'reporte'] },
+  { l: 'Administración', m: ['clientes'] },
+  { l: 'Coordinación', m: ['clientes', 'actividades', 'reporte'] }
+];
+let USERS_CACHE = [];
+async function renderUsuarios(stage) {
+  stage.innerHTML = `
+  <section class="panel" id="usuarios">
+    <div class="view-head">
+      <div><h1>Usuarios</h1><p>Crea accesos para tu equipo y define qué módulos puede ver cada perfil.</p></div>
+      <div class="actions"><button class="btn primary" data-act="newuser">${ICON.plus}Nuevo usuario</button></div>
+    </div>
+    <div class="table-wrap"><div class="table-scroll"><table class="dt users-dt">
+      <thead><tr><th>Usuario</th><th>Perfil</th><th>Módulos visibles</th><th>Estado</th><th>Último acceso</th><th style="width:44px"></th></tr></thead>
+      <tbody id="uBody"><tr><td colspan="6"><div class="empty">Cargando…</div></td></tr></tbody>
+    </table></div></div>
+    ${Api.mode === 'local' ? '<p class="meta-line" style="margin-top:12px">Vista previa: los usuarios se guardan solo en este navegador. En el servidor se guardan cifrados.</p>' : ''}
+  </section>`;
+  const root = $('#usuarios');
+  root.addEventListener('click', e => {
+    if (e.target.closest('[data-act=newuser]')) return userForm();
+    const mb = e.target.closest('[data-umore]');
+    if (mb) {
+      const u = USERS_CACHE.find(x => x.username === mb.dataset.umore);
+      popMenu(mb, [
+        { label: 'Editar', icon: 'edit', run: () => userForm(u) },
+        { label: u.active ? 'Desactivar' : 'Activar', icon: 'lock', run: () => toggleUser(u) },
+        '-',
+        { label: 'Eliminar', icon: 'trash', danger: true, disabled: u.username === ME.username, run: () => deleteUser(u) }
+      ]);
+      return;
+    }
+    const tr = e.target.closest('tr[data-u]');
+    if (tr) { const u = USERS_CACHE.find(x => x.username === tr.dataset.u); if (u && !u.builtin) userForm(u); }
+  });
+  await loadUsers();
+}
+async function loadUsers() {
+  try { USERS_CACHE = (await Api.users.list()).users; }
+  catch (e) { if ($('#uBody')) $('#uBody').innerHTML = `<tr><td colspan="6"><div class="empty">${esc(e.message)}</div></td></tr>`; return; }
+  const body = $('#uBody'); if (!body) return;
+  body.innerHTML = USERS_CACHE.map(u => `
+    <tr data-u="${esc(u.username)}" class="${u.builtin ? 'builtin' : ''}">
+      <td><div class="ucell"><span class="avatar" style="background:${hashColor(u.username)}">${esc(initials(u.name || u.username))}</span><div class="cname"><b>${esc(u.name)}</b><small>@${esc(u.username)}${u.username === ME.username ? ' · tú' : ''}</small></div></div></td>
+      <td data-l="Perfil"><span class="rpill ${u.role}">${esc(ROLE_LABEL[u.role] || u.role)}</span>${u.builtin ? ` <span class="meta-line" title="Definido en las variables de entorno de Easypanel">${ICON.lock.replace('width="20" height="20"', 'width="13" height="13"')} Easypanel</span>` : ''}</td>
+      <td data-l="Módulos" class="svc"><div class="chips">${u.role === 'admin' ? '<span class="chip c6">Todos + Usuarios</span>' : (u.modules.length ? u.modules.map(m => `<span class="chip c${ALL_MODS.indexOf(m)}">${esc(MOD_LABEL[m])}</span>`).join('') : '<span class="meta-line">Ninguno</span>')}</div></td>
+      <td data-l="Estado"><span class="upill ${u.active ? 'on' : ''}">${u.active ? 'Activo' : 'Inactivo'}</span></td>
+      <td data-l="Último acceso">${u.lastLogin ? fmtDate(u.lastLogin) : '—'}</td>
+      <td class="act">${u.builtin ? '' : `<button class="icon-btn" data-umore="${esc(u.username)}" aria-label="Acciones">${ICON.more}</button>`}</td>
+    </tr>`).join('');
+}
+function userForm(u) {
+  const isNew = !u;
+  u = u || { username: '', name: '', role: 'colaborador', modules: ['actividades', 'reporte'], active: true };
+  const mods = new Set(u.modules || []);
+  openModal({
+    title: isNew ? 'Nuevo usuario' : 'Editar usuario', size: 'wide',
+    body: `<div class="grid2">
+      <div class="field"><label>Usuario <span class="req">*</span></label><input class="input" name="username" value="${esc(u.username)}" ${isNew ? 'autofocus' : 'disabled'} autocapitalize="none" spellcheck="false" placeholder="ej. diego.h"></div>
+      <div class="field"><label>Nombre completo <span class="req">*</span></label><input class="input" name="name" value="${esc(u.name)}" placeholder="Nombre y apellido"></div>
+      <div class="field span2"><label>${isNew ? 'Contraseña <span class="req">*</span>' : 'Nueva contraseña <span class="meta-line">(déjala vacía para no cambiarla)</span>'}</label>
+        <div class="pass-wrap"><input class="input" name="password" type="text" autocomplete="new-password" placeholder="Mínimo 8 caracteres"><button type="button" class="icon-btn" data-gen title="Generar contraseña segura">${ICON.key}</button></div></div>
+      <div class="field span2"><label>Perfil</label>
+        <div class="seg" id="roleSeg"><button type="button" data-r="colaborador" class="${u.role !== 'admin' ? 'on' : ''}">Colaborador</button><button type="button" data-r="admin" class="${u.role === 'admin' ? 'on' : ''}">Administrador</button></div>
+        <p class="meta-line" id="roleNote"></p></div>
+      <div class="field span2" id="modWrap"><label>Módulos que puede visualizar</label>
+        <div class="presets" style="margin:0 0 4px">${PRESETS.map((p, i) => `<button type="button" class="chip-btn" data-preset="${i}">${p.l}</button>`).join('')}</div>
+        <div class="modchecks">${MOD_INFO.map(m => `<label class="modcheck"><input type="checkbox" value="${m.k}" ${mods.has(m.k) ? 'checked' : ''}><span class="mi">${ICON[m.icon]}</span><span><b>${MOD_LABEL[m.k]}</b><small>${m.d}</small></span></label>`).join('')}</div></div>
+      <label class="switch span2"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}><span class="sw"></span><span>Acceso activo</span></label>
+    </div>`,
+    foot: `<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${ICON.save}${isNew ? 'Crear usuario' : 'Guardar'}</button>`,
+    onMount(m, close) {
+      let role = u.role === 'admin' ? 'admin' : 'colaborador';
+      const f = n => m.querySelector(`[name=${n}]`);
+      const checks = () => $$('.modcheck input', m);
+      function syncRole() {
+        $$('#roleSeg button', m).forEach(b => b.classList.toggle('on', b.dataset.r === role));
+        const adm = role === 'admin';
+        checks().forEach(c => { c.disabled = adm; if (adm) c.checked = true; });
+        m.querySelector('#modWrap').classList.toggle('disabled', adm);
+        m.querySelector('#roleNote').textContent = adm ? 'Ve todos los módulos y puede crear, editar y eliminar usuarios.' : 'Solo ve los módulos marcados abajo.';
+      }
+      m.querySelector('#roleSeg').onclick = e => { const b = e.target.closest('[data-r]'); if (!b) return; if (role === 'admin' && b.dataset.r !== 'admin') checks().forEach(c => c.checked = mods.has(c.value)); role = b.dataset.r; syncRole(); };
+      m.querySelector('.presets').onclick = e => { const b = e.target.closest('[data-preset]'); if (!b || role === 'admin') return; const p = PRESETS[+b.dataset.preset]; checks().forEach(c => c.checked = p.m.includes(c.value)); };
+      m.querySelector('[data-gen]').onclick = () => {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!#$%*';
+        const arr = crypto.getRandomValues(new Uint32Array(12));
+        f('password').value = Array.from(arr, n => chars[n % chars.length]).join('');
+      };
+      syncRole();
+      m.querySelector('[data-save]').onclick = async () => {
+        const body = { name: f('name').value.trim(), password: f('password').value, role, modules: role === 'admin' ? ALL_MODS : checks().filter(c => c.checked).map(c => c.value), active: f('active').checked };
+        if (isNew) body.username = f('username').value.trim().toLowerCase();
+        if (role !== 'admin' && !body.modules.length && !await confirmDialog('Sin módulos', 'Este usuario no podrá ver ningún módulo, solo la búsqueda vacía. ¿Guardar así?', 'Guardar', false)) return;
+        const btn = m.querySelector('[data-save]'); btn.disabled = true;
+        try {
+          if (isNew) await Api.users.create(body); else await Api.users.update(u.username, body);
+          close(); toast(isNew ? `Usuario ${body.username} creado` : 'Usuario actualizado'); loadUsers();
+        } catch (e) { toast(e.message, true); btn.disabled = false; }
+      };
+    }
+  });
+}
+async function toggleUser(u) {
+  try { await Api.users.update(u.username, { name: u.name, role: u.role, modules: u.modules, active: !u.active }); toast(u.active ? 'Usuario desactivado' : 'Usuario activado'); loadUsers(); }
+  catch (e) { toast(e.message, true); }
+}
+async function deleteUser(u) {
+  if (!await confirmDialog('Eliminar usuario', `¿Eliminar a <b>${esc(u.name)}</b> (@${esc(u.username)})? Perderá el acceso de inmediato.`)) return;
+  try { await Api.users.remove(u.username); toast('Usuario eliminado'); loadUsers(); } catch (e) { toast(e.message, true); }
+}
+
+/* ================= Login / usuario actual ================= */
+function showLogin(msg, prefill = '') {
+  document.body.classList.add('locked');
+  setBand(false);
+  let ov = $('#login');
+  if (!ov) { ov = document.createElement('div'); ov.id = 'login'; document.body.appendChild(ov); }
+  ov.innerHTML = `
+    <form class="login-card" autocomplete="on">
+      <img class="login-logo" alt="arquitechtura" src="${window.AGIS_LOGOS ? AGIS_LOGOS.wordmark : ''}">
+      <h1>Iniciar sesión</h1>
+      <p class="login-sub">Dashboard de proyectos · Arquitechtura AGIS</p>
+      <div class="login-msg ${msg ? '' : 'hidden'}" id="lMsg">${esc(msg || '')}</div>
+      <div class="field"><label for="lUser">Usuario</label><input class="input" id="lUser" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" value="${esc(prefill)}" required></div>
+      <div class="field"><label for="lPass">Contraseña</label>
+        <div class="pass-wrap"><input class="input" id="lPass" name="password" type="password" autocomplete="current-password" required><button type="button" class="icon-btn" id="lEye" aria-label="Mostrar contraseña">${ICON.eye}</button></div></div>
+      <button class="btn primary login-btn" type="submit" id="lBtn">Entrar</button>
+      ${Api.mode === 'local' ? '<p class="login-hint">Vista previa sin servidor · usuario <b>admin</b> / contraseña <b>admin</b></p>' : ''}
+    </form>`;
+  const f = ov.querySelector('form'), u = $('#lUser'), pw = $('#lPass'), btn = $('#lBtn'), lm = $('#lMsg');
+  $('#lEye').onclick = () => { pw.type = pw.type === 'password' ? 'text' : 'password'; };
+  (prefill ? pw : u).focus();
+  f.addEventListener('submit', async e => {
+    e.preventDefault();
+    btn.disabled = true; btn.textContent = 'Verificando…';
+    try {
+      const me = await Api.login(u.value.trim(), pw.value);
+      ov.remove(); document.body.classList.remove('locked'); expiredShown = false;
+      await startApp(me);
+    } catch (err) {
+      lm.textContent = err.message || 'No se pudo iniciar sesión'; lm.classList.remove('hidden'); lm.classList.add('err');
+      lm.classList.toggle('blocked', err.status === 429);
+      if (err.data && err.data.remaining > 0 && err.data.remaining < 5) lm.textContent += ` Te quedan ${err.data.remaining} intento${err.data.remaining > 1 ? 's' : ''}.`;
+      pw.value = ''; pw.focus();
+      btn.disabled = false; btn.textContent = 'Entrar';
+    }
+  });
+}
+function renderUserChip() {
+  const c = $('#userChip');
+  c.innerHTML = `<span class="avatar" style="background:${hashColor(ME.username)}">${esc(initials(ME.name || ME.username))}</span><span class="user-meta"><b>${esc(ME.name || ME.username)}</b><small>${esc(ROLE_LABEL[ME.role] || ME.role)}</small></span>${ICON.down.replace('width="20" height="20"', 'width="16" height="16" class="chev"')}`;
+}
+function userMenu(anchor) {
+  popMenu(anchor, [
+    { header: `<b>${esc(ME.name || ME.username)}</b><small>@${esc(ME.username)} · ${esc(ROLE_LABEL[ME.role] || '')}</small>` },
+    ...(isAdmin() ? [{ label: 'Administrar usuarios', icon: 'shield', run: () => go('usuarios') }, '-'] : []),
+    { label: 'Cambiar de usuario', icon: 'swap', run: () => logout('Inicia sesión con otra cuenta.') },
+    { label: 'Cerrar sesión', icon: 'logout', danger: true, run: () => logout('Sesión cerrada.') }
+  ]);
+}
+async function logout(msg) {
+  await Api.logout();
+  ME = null; current = null;
+  modalStack.slice().forEach(c => c());
+  $('#stage').innerHTML = ''; $('#crumb').textContent = '';
+  showLogin(msg);
+}
+async function startApp(me) {
+  ME = me;
+  try { await Store.init(); }
+  catch (e) { if (e.status === 401) return; toast('No se pudo cargar la información: ' + e.message, true); return; }
+  migrateData();
+  renderUserChip();
+  buildBand();
+  R = null;
+  const h = location.hash.slice(1);
+  if (MODULES.some(m => m.k === h && !m.soon && allowed(m))) go(h); else go(null);
+}
+
 /* ================= Arranque ================= */
 (async function boot() {
-  buildBand();
   if (window.AGIS_LOGOS) $('#topLogo').src = AGIS_LOGOS.wordmark;
-  $('#menuBtn').onclick = () => { if (current) go(null); else setBand(!$('#band').classList.contains('open')); };
+  $('#menuBtn').onclick = () => { if (!ME) return; if (current) go(null); else setBand(!$('#band').classList.contains('open')); };
   $('#brandLink').onclick = e => { e.preventDefault(); go(null); };
-  await Store.init();
-  migrateData();
-  const h = location.hash.slice(1);
-  if (MODULES.some(m => m.k === h && !m.soon)) go(h); else go(null);
-  window.addEventListener('hashchange', () => { const k = location.hash.slice(1); if (k !== (current || '')) go(k || null); });
+  $('#userChip').onclick = e => { if (ME) userMenu(e.currentTarget); };
+  window.addEventListener('hashchange', () => { if (!ME) return; const k = location.hash.slice(1); if (k !== (current || '')) go(k || null); });
   document.addEventListener('keydown', e => {
-    if (e.key === '/' && !current && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !modalStack.length) { e.preventDefault(); $('#gInput')?.focus(); }
+    if (e.key === '/' && ME && !current && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !modalStack.length) { e.preventDefault(); $('#gInput')?.focus(); }
   });
+  const me = await Api.detect();
+  if (me) await startApp(me); else showLogin('');
 })();
