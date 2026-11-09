@@ -23,7 +23,7 @@ const MAX_FAILS = 5, LOCK_MS = 15 * 60 * 1000;
 const MAX_BODY = 60 * 1024 * 1024, MAX_IMG = 6 * 1024 * 1024;
 const MODULES = ['clientes', 'actividades', 'reporte', 'proyectos', 'monitor'];
 const ROLES = ['admin', 'colaborador'];
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webp': 'image/webp' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webp': 'image/webp', '.webmanifest': 'application/manifest+json' };
 
 fs.mkdirSync(path.join(DATA_DIR, 'backups'), { recursive: true });
 fs.mkdirSync(UPLOADS, { recursive: true });
