@@ -1364,10 +1364,21 @@ async function srcToDataURL(src) {
   const b = await r.blob();
   return await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b); });
 }
+let fontsLoading = null;
+function loadPdfFonts() {
+  if (window.AGIS_PDF_FONTS) return Promise.resolve();
+  if (!fontsLoading) fontsLoading = new Promise(res => {
+    const sc = document.createElement('script'); sc.src = 'pdf-fonts.js';
+    sc.onload = () => res(); sc.onerror = () => { fontsLoading = null; res(); }; // sin fuente → Helvetica
+    document.head.appendChild(sc);
+  });
+  return fontsLoading;
+}
 async function makePDF(d) {
   if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('No se pudo cargar el generador de PDF (revisa la conexión)');
+  await loadPdfFonts();
   const fotos = await Promise.all((d.fotos || []).map(async f => ({ ...f, src: await srcToDataURL(f.src) })));
-  return buildReportPDF({ ...d, fotos }, { jsPDF: window.jspdf.jsPDF, logos: window.AGIS_LOGOS });
+  return buildReportPDF({ ...d, fotos }, { jsPDF: window.jspdf.jsPDF, logos: window.AGIS_LOGOS, fonts: window.AGIS_PDF_FONTS });
 }
 function drawBullets() {
   $('#bullets').innerHTML = R.conclusiones.map((t, i) => `
