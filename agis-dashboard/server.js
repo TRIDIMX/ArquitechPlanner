@@ -12,6 +12,7 @@ const PORT = +process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const NOTIF_FILE = path.join(DATA_DIR, 'notifications.json');
 const UPLOADS = path.join(DATA_DIR, 'uploads');
 const PUBLIC = path.join(__dirname, 'public');
 const ADMIN_USER = (process.env.AUTH_USER || '').trim().toLowerCase();
@@ -21,7 +22,7 @@ const TRUST_PROXY = process.env.TRUST_PROXY !== '0';
 const SESSION_MS = (+process.env.SESSION_DAYS || 7) * 864e5;
 const MAX_FAILS = 5, LOCK_MS = 15 * 60 * 1000;
 const MAX_BODY = 60 * 1024 * 1024, MAX_IMG = 6 * 1024 * 1024;
-const MODULES = ['clientes', 'actividades', 'reporte', 'proyectos', 'monitor'];
+const MODULES = ['clientes', 'actividades', 'reporte', 'presupuesto', 'proyectos', 'monitor'];
 const ROLES = ['admin', 'colaborador'];
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.webp': 'image/webp', '.webmanifest': 'application/manifest+json' };
 
@@ -30,6 +31,7 @@ fs.mkdirSync(UPLOADS, { recursive: true });
 const readJSONFile = (f, def) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return def; } };
 let db = readJSONFile(DB_FILE, {});
 let users = readJSONFile(USERS_FILE, []);
+let notifs = readJSONFile(NOTIF_FILE, {});
 
 /* ---------- Persistencia ---------- */
 let qDb = Promise.resolve(), qUsers = Promise.resolve();
@@ -46,6 +48,8 @@ function persistDb() {
   }).catch(err => console.error('Error al guardar db:', err));
   return qDb;
 }
+let qNotif = Promise.resolve();
+function persistNotifs() { qNotif = qNotif.then(() => atomicWrite(NOTIF_FILE, JSON.stringify(notifs))).catch(e => console.error('Error al guardar notificaciones:', e)); return qNotif; }
 function persistUsers() { qUsers = qUsers.then(() => atomicWrite(USERS_FILE, JSON.stringify(users, null, 1))).catch(e => console.error('Error al guardar usuarios:', e)); return qUsers; }
 
 /* ---------- Usuarios / contraseñas ---------- */
@@ -124,12 +128,13 @@ function dbFor(u) {
   const out = { seeded: db.seeded };
   out.clientes = can(u, 'clientes') ? (db.clientes || []) : (db.clientes || []).map(c => ({ id: c.id, nombre: c.nombre, estatus: c.estatus }));
   if (can(u, 'actividades')) { out.board = db.board || null; out.config = db.config || null; }
+  if (can(u, 'presupuesto')) out.presupuestos = db.presupuestos || [];
   if (can(u, 'reporte')) out.reportes = db.reportes || [];
   else if (can(u, 'actividades')) out.reportes = (db.reportes || []).map(({ data, ...r }) => r);
   out.colPrefs = (db.colPrefs || {})[u.username] || null;
   return out;
 }
-const PUT_PERM = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', seeded: null, colPrefs: null };
+const PUT_PERM = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto', seeded: null, colPrefs: null };
 
 /* ---------- Validación de usuarios ---------- */
 function cleanUserInput(b, isNew) {
@@ -237,6 +242,36 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      /* --- Directorio (cualquier usuario con sesión): para elegir a quién notificar --- */
+      if (p === '/api/directory' && method === 'GET') {
+        const list = [...(ADMIN_USER ? [findUser(ADMIN_USER)] : []), ...users].filter(u => u.active !== false)
+          .map(u => ({ username: u.username, name: u.name, role: u.role, modules: modulesOf(u) }));
+        return send(req, res, 200, { users: list });
+      }
+
+      /* --- Notificaciones --- */
+      if (p === '/api/notifications' && method === 'GET') return send(req, res, 200, { items: notifs[me.username] || [] });
+      if (p === '/api/notifications' && method === 'POST') {
+        const b = await readBody(req, 20 * 1024) || {};
+        const to = [...new Set(Array.isArray(b.to) ? b.to.map(x => String(x).toLowerCase()) : [])].slice(0, 50);
+        const title = String(b.title || '').trim().slice(0, 160), body = String(b.body || '').trim().slice(0, 400);
+        const link = b.link && ['card'].includes(b.link.type) ? { type: b.link.type, id: String(b.link.id || '').slice(0, 40) } : null;
+        if (!to.length || !title) return send(req, res, 400, { error: 'Faltan destinatarios o título' });
+        const now = new Date().toISOString(); let sent = 0;
+        to.forEach(u => {
+          const t = findUser(u); if (!t || t.active === false) return;
+          const list = notifs[t.username] = notifs[t.username] || [];
+          list.unshift({ id: crypto.randomBytes(8).toString('hex'), title, body, link, from: me.username, fromName: me.name, created: now });
+          if (list.length > 200) list.length = 200;
+          sent++;
+        });
+        await persistNotifs();
+        return send(req, res, 200, { ok: true, sent });
+      }
+      if (p === '/api/notifications' && method === 'DELETE') { notifs[me.username] = []; await persistNotifs(); return send(req, res, 200, { ok: true }); }
+      const nm = /^\/api\/notifications\/([a-f0-9]{16})$/.exec(p);
+      if (nm && method === 'DELETE') { notifs[me.username] = (notifs[me.username] || []).filter(n => n.id !== nm[1]); await persistNotifs(); return send(req, res, 200, { ok: true }); }
+
       /* --- Administración de usuarios (solo admin) --- */
       if (p === '/api/users' || p.startsWith('/api/users/')) {
         if (me.role !== 'admin') return send(req, res, 403, { error: 'Solo administradores' });
@@ -269,6 +304,7 @@ const server = http.createServer(async (req, res) => {
           if (method === 'DELETE') {
             if (target.username === me.username) return send(req, res, 400, { error: 'No puedes borrar tu propio usuario' });
             users = users.filter(x => x !== target); await persistUsers(); killSessions(target.username);
+            if (notifs[target.username]) { delete notifs[target.username]; persistNotifs(); }
             return send(req, res, 200, { ok: true });
           }
         }

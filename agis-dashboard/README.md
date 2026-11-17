@@ -1,13 +1,13 @@
-# Arquitechtura AGIS · Dashboard (iteración 2)
+# Arquitechtura AGIS · Dashboard (iteración 3)
 
 Módulos: **Home** (banda de botones flotantes), **Clientes**, **Actividades** (tablero tipo Trello) y **Reporte Visita** (formulario → PDF con firmas).
 
 ## Estructura
 ```
 server.js        Servidor Node ≥18 sin dependencias (estáticos + API JSON)
-public/          index.html · app.css · app.js · pdf.js
+public/          index.html · app.css · app.js · pdf.js · pdf-fonts.js (Manrope, OFL) · logos.js
 Dockerfile       Imagen para Easypanel
-data/            (se crea solo) db.json, users.json, uploads/ y backups/ diarios (30 días)
+data/            (se crea solo) db.json, users.json, notifications.json, uploads/ y backups/ diarios (30 días)
 ```
 
 ## Despliegue en Easypanel (VPS Hostinger)
@@ -47,6 +47,9 @@ Perfil *Administrador* = todos los módulos + gestión de usuarios. *Colaborador
 - `GET /api/db` (filtrado por permisos) · `PUT /api/db/{clientes|board|config|reportes|colPrefs}`
 - `POST /api/upload` (fotos del reporte → `/data/uploads`, servidas solo con sesión)
 - `GET|POST /api/users` · `PUT|DELETE /api/users/{usuario}` (admin)
+- `GET /api/directory` (usuarios activos, para elegir a quién notificar)
+- `GET|POST|DELETE /api/notifications` · `DELETE /api/notifications/{id}`
+- `PUT /api/db/presupuestos` (módulo Presupuesto)
 
 Sin servidor (vista previa) la app trabaja en modo local con usuario `admin` / `admin`.
 

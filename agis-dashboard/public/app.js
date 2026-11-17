@@ -59,6 +59,9 @@ const ICON = {
   lock: I('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
   eye: I('<path d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z"/><circle cx="12" cy="12" r="3"/>'),
   key: I('<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M15 8l2 2"/>'),
+  bell: I('<path d="M6 9a6 6 0 0 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9z"/><path d="M10 19a2 2 0 0 0 4 0"/>'),
+  cash: I('<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 9.5v5M18 9.5v5"/>'),
+  check: I('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
   wand: I('<path d="m4 20 10-10M15 4v3M13.5 5.5h3M19 9v2M18 10h2M18 3v1.5M17.25 3.75h1.5"/>')
 };
 
@@ -96,8 +99,8 @@ const tintStyle = k => { const p = pal(k); return p.bg ? `--pbg:${p.bg};--pbd:${
 const COL_DEFAULTS = ['gris', 'azul', 'ambar', 'verde', 'morado', 'turquesa', 'rosa', 'marino'];
 
 /* ================= Sesión / API ================= */
-const ALL_MODS = ['clientes', 'actividades', 'reporte', 'proyectos', 'monitor'];
-const MOD_LABEL = { clientes: 'Clientes', actividades: 'Actividades', reporte: 'Reporte Visita', proyectos: 'Proyectos', monitor: 'Monitor' };
+const ALL_MODS = ['clientes', 'actividades', 'reporte', 'presupuesto', 'proyectos', 'monitor'];
+const MOD_LABEL = { clientes: 'Clientes', actividades: 'Actividades', reporte: 'Reporte Visita', presupuesto: 'Presupuesto', proyectos: 'Proyectos', monitor: 'Monitor' };
 let ME = null;
 const isAdmin = () => !!ME && ME.role === 'admin';
 const can = m => !!ME && (ME.role === 'admin' || (ME.modules || []).includes(m));
@@ -160,10 +163,30 @@ const Api = {
   },
   async upload(dataURL) { if (this.mode !== 'api') return dataURL; return (await this.req('POST', 'api/upload', { data: dataURL })).url; }
 };
+/* Notificaciones en modo vista previa (este navegador) */
+const LocalNotif = {
+  key: 'agis-local-notifs',
+  all() { try { return JSON.parse(localStorage.getItem(this.key) || '{}') || {}; } catch (e) { return this._m || {}; } },
+  save(o) { this._m = o; try { localStorage.setItem(this.key, JSON.stringify(o)); } catch (e) {} },
+  list() { return { items: this.all()[ME.username] || [] }; },
+  send(b) { const o = this.all(), now = new Date().toISOString(); b.to.forEach(u => { (o[u] = o[u] || []).unshift({ id: uid().padEnd(16, '0').slice(0, 16), title: b.title, body: b.body, link: b.link, from: ME.username, fromName: ME.name, created: now }); }); this.save(o); return { ok: true, sent: b.to.length }; },
+  remove(id) { const o = this.all(); o[ME.username] = (o[ME.username] || []).filter(n => n.id !== id); this.save(o); },
+  clear() { const o = this.all(); o[ME.username] = []; this.save(o); }
+};
+Api.notif = {
+  list: () => Api.mode === 'api' ? Api.req('GET', 'api/notifications') : Promise.resolve(LocalNotif.list()),
+  send: b => Api.mode === 'api' ? Api.req('POST', 'api/notifications', b) : Promise.resolve(LocalNotif.send(b)),
+  remove: id => Api.mode === 'api' ? Api.req('DELETE', 'api/notifications/' + id) : Promise.resolve(LocalNotif.remove(id)),
+  clear: () => Api.mode === 'api' ? Api.req('DELETE', 'api/notifications') : Promise.resolve(LocalNotif.clear())
+};
+Api.directory = async () => {
+  if (Api.mode === 'api') return (await Api.req('GET', 'api/directory')).users;
+  return (await LocalAuth.list()).users.filter(u => u.active !== false);
+};
 let expiredShown = false;
 function sessionExpired() {
   if (!ME || expiredShown) return;
-  expiredShown = true; ME = null;
+  expiredShown = true; ME = null; stopNotifs();
   modalStack.slice().forEach(c => c());
   showLogin('Tu sesión terminó. Vuelve a iniciar sesión.');
 }
@@ -173,7 +196,7 @@ const Store = {
   mode: 'memory',
   data: { clientes: [], board: null, reportes: [], config: null },
   async init() {
-    this.data = { clientes: [], board: null, reportes: [], config: null, colPrefs: null };
+    this.data = { clientes: [], board: null, reportes: [], presupuestos: [], config: null, colPrefs: null };
     if (Api.mode === 'api') {
       Object.assign(this.data, await Api.req('GET', 'api/db'));
       this.mode = 'api';
@@ -184,6 +207,7 @@ const Store = {
     if (!this.data.config) this.data.config = { equipo: ['Luis Gómez', 'Diego', 'Omar'] };
     if (!Array.isArray(this.data.clientes)) this.data.clientes = [];
     if (!Array.isArray(this.data.reportes)) this.data.reportes = [];
+    if (!Array.isArray(this.data.presupuestos)) this.data.presupuestos = [];
     if (!this.data.board) { this.data.board = seedBoard(); if (can('actividades')) this.save('board'); }
     if (!this.data.seeded && !this.data.clientes.length && can('clientes')) { this.data.clientes = seedClientes(); this.data.seeded = true; this.save('clientes'); this.save('seeded'); }
     const b = $('#syncBadge');
@@ -191,8 +215,13 @@ const Store = {
     b.textContent = this.mode === 'api' ? 'Servidor' : this.mode === 'local' ? 'Vista previa' : 'Sin guardar';
     b.title = this.mode === 'api' ? 'Datos guardados en el servidor' : this.mode === 'local' ? 'Datos guardados solo en este navegador' : 'Los datos se pierden al cerrar';
   },
+  async reload() {
+    if (this.mode !== 'api') return;
+    const fresh = await Api.req('GET', 'api/db');
+    ['clientes', 'board', 'reportes', 'presupuestos', 'config'].forEach(k => { if (fresh[k] !== undefined && fresh[k] !== null) this.data[k] = fresh[k]; });
+  },
   save(key) {
-    const need = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte' }[key];
+    const need = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto' }[key];
     if (need && !can(need)) return;
     if (this.mode === 'api') {
       Api.req('PUT', 'api/db/' + key, this.data[key]).catch(e => { if (e.status !== 401) toast(e.status === 403 ? 'Sin permiso para guardar en este módulo' : 'No se pudo guardar en el servidor', true); });
@@ -328,6 +357,7 @@ const MODULES = [
   { k: 'clientes', t: 'Clientes', s: 'Cartera y saldos', icon: 'users', hue: 'h-indigo', render: renderClientes },
   { k: 'actividades', t: 'Actividades', s: 'Equipo en campo', icon: 'kanban', hue: 'h-teal', render: renderActividades },
   { k: 'reporte', t: 'Reporte Visita', s: 'Genera PDF firmado', icon: 'report', hue: 'h-amber', render: renderReporte },
+  { k: 'presupuesto', t: 'Presupuesto', s: 'Visitas técnicas', icon: 'cash', hue: 'h-green', render: renderPresupuesto },
   { k: 'proyectos', t: 'Proyectos', s: 'Próximamente', icon: 'folder', hue: 'h-slate', soon: true },
   { k: 'monitor', t: 'Monitor', s: 'Próximamente', icon: 'pulse', hue: 'h-rose', soon: true },
   { k: 'usuarios', t: 'Usuarios', s: 'Accesos y perfiles', icon: 'shield', hue: 'h-navy', adminOnly: true, render: renderUsuarios }
@@ -404,6 +434,10 @@ function searchIndex(q) {
     if (hit([k.title, cn, k.tipo, (k.responsables || []).join(' '), k.direccion, k.notas, col.name].join(' ')))
       out.push({ type: 'actividad', id: k.id, title: k.title, sub: [col.name, k.tipo, cn, k.fecha ? fmtDate(k.fecha) : ''].filter(Boolean).join(' · ') });
   }));
+  if (can('presupuesto')) Store.data.presupuestos.forEach(b => {
+    if (hit([b.folio, b.clienteNombre, b.titulo, b.data && b.data.obra].join(' ')))
+      out.push({ type: 'presupuesto', id: b.id, title: `${b.folio || 'Sin folio'} — ${b.titulo || ''}`, sub: `${fmtDate(b.fecha)} · ${b.clienteNombre || ''} · $${AGIS_money(b.total)} ${b.moneda || ''}` });
+  });
   if (can('reporte')) Store.data.reportes.forEach(r => {
     if (hit([r.folio, r.codigo, r.asunto, r.tipo, r.data?.descripcion].join(' ')))
       out.push({ type: 'reporte', id: r.id, title: `${r.folio || 'Sin folio'} — ${r.asunto || r.tipo}`, sub: `${fmtDate(r.fecha)} · ${r.codigo || ''}` });
@@ -413,7 +447,8 @@ function searchIndex(q) {
 const G_META = {
   cliente: { label: 'Clientes', icon: 'users', bg: '#eef0ff', fg: '#4f46e5' },
   actividad: { label: 'Actividades', icon: 'kanban', bg: '#e9faf6', fg: '#0f8a7a' },
-  reporte: { label: 'Reportes de visita', icon: 'pdf', bg: '#fde8eb', fg: '#c0001a' }
+  reporte: { label: 'Reportes de visita', icon: 'pdf', bg: '#fde8eb', fg: '#c0001a' },
+  presupuesto: { label: 'Presupuestos', icon: 'cash', bg: '#e9f7ef', fg: '#15803d' }
 };
 function renderLanding(stage) {
   stage.innerHTML = `
@@ -463,6 +498,7 @@ function openResult(it) {
   if (it.type === 'cliente') { go('clientes'); const c = Store.data.clientes.find(x => x.id === it.id); if (c) clientForm(c); }
   else if (it.type === 'actividad') { go('actividades'); const { col, card } = findCard(it.id); if (card) cardForm(card, col.id); }
   else if (it.type === 'reporte') openReport(it.id);
+  else if (it.type === 'presupuesto') openBudget(it.id);
 }
 
 /* ================= CLIENTES ================= */
@@ -835,6 +871,8 @@ function renderActividades(stage) {
     const add = e.target.closest('[data-addcard]'); if (add) return cardForm(null, add.dataset.addcard);
     const cm = e.target.closest('[data-colmenu]'); if (cm) return colMenu(cm, cm.dataset.colmenu);
     const ct = e.target.closest('[data-rename]'); if (ct) return renameColumn(ct.dataset.rename);
+    const ring = e.target.closest('[data-ring]');
+    if (ring) { const id = ring.closest('.kcard').dataset.id, { card: k } = findCard(id); setCardDone(id, !k.done); return; }
     const card = e.target.closest('.kcard'); if (card) { const { col, card: k } = findCard(card.dataset.id); cardForm(k, col.id); }
   });
   initDnD($('#board'));
@@ -860,11 +898,12 @@ function drawBoard() {
         <button class="icon-btn" data-colmenu="${col.id}" aria-label="Opciones de columna">${ICON.more}</button></div>
       <div class="klist">${cards.map(k => {
         const cname = clientName(k.clienteId) || k.clienteTxt;
-        const late = !col.done && k.fecha && k.fecha < today;
+        const late = !col.done && !k.done && k.fecha && k.fecha < today;
         const kt = tintStyle(k.color);
         const reps = (k.reportIds || []).map(id => Store.data.reportes.find(r => r.id === id)).filter(Boolean);
-        return `<article class="kcard ${col.done ? 'done' : ''} ${kt ? 'tinted' : ''}" data-id="${k.id}" style="${kt}">
-          <div class="kt"><span class="ring"></span><b>${esc(k.title)}</b></div>
+        const isDone = !!(k.done || col.done);
+        return `<article class="kcard ${isDone ? 'done' : ''} ${kt ? 'tinted' : ''}" data-id="${k.id}" style="${kt}">
+          <div class="kt"><button class="ring" data-ring aria-label="${isDone ? 'Desmarcar como lista' : 'Marcar como lista'}" title="${isDone ? 'Lista' : 'Marcar como lista'}">${ICON.check}</button><b>${esc(k.title)}</b></div>
           ${cname ? `<div class="kclient">${ICON.building}${esc(cname)}</div>` : ''}
           <div class="kmeta">
             ${k.tipo ? `<span class="ktag"><i style="background:${tipoColor(k.tipo)}"></i>${esc(k.tipo)}</span>` : ''}
@@ -943,6 +982,7 @@ function initDnD(board) {
         to.cards.splice(idx, 0, k);
         if (from.id !== to.id) { k.demo = false; k.movedAt = new Date().toISOString(); }
         Store.save('board');
+        if (to.done && !k.done) setTimeout(() => setCardDone(k.id, true, { noMove: true }), 0);
         dragJustEnded = true; setTimeout(() => dragJustEnded = false, 50);
         if (from.id !== to.id) toast(`Movida a “${to.name}”`);
       }
@@ -1012,6 +1052,10 @@ async function deleteColumn(id) {
 function cardForm(k, colId) {
   const isNew = !k;
   k = k ? { ...k, reportIds: [...(k.reportIds || [])] } : { title: '', tipo: 'Visita técnica', clienteId: '', clienteTxt: '', fecha: todayISO(), hora: '', responsables: [], direccion: '', notas: '', color: 'none', reportIds: [] };
+  const wasDone = !!k.done;
+  if (k.moveTo === undefined) k.moveTo = (Store.data.board.columns.find(c => c.done) || {}).id || '';
+  let notify = !!k.notify;
+  const notifyUsers = new Set(k.notifyUsers || []);
   let cardId = k.id || null;
   const resp = new Set(k.responsables || []);
   let color = k.color || 'none';
@@ -1046,6 +1090,14 @@ function cardForm(k, colId) {
       <div class="field span2"><label>Notas</label><textarea class="input" name="notas">${esc(k.notas)}</textarea></div>
       <div class="field span2"><label>Reportes de visita</label><div id="repLinks">${repLinksHTML()}</div></div>
       <div class="field span2"><label>Color de la tarjeta</label><div id="cardSw">${swatchesHTML(color)}</div></div>
+      <div class="field span2 done-box">
+        <label class="switch"><input type="checkbox" name="done" ${k.done ? 'checked' : ''}><span class="sw"></span><span>Marcar como <b>Lista</b>${k.doneAt ? ` <span class="meta-line">· ${fmtDate(k.doneAt)}</span>` : ''}</span></label>
+        <div class="grid2" style="margin-top:12px">
+          <div class="field"><label>Al marcar como Lista, mover a</label><select class="input" name="moveTo"><option value="">No mover la tarjeta</option>${cols.map(c => `<option value="${c.id}" ${k.moveTo === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+          <div class="field"><label>Notificar usuarios</label><div class="seg" id="notifSeg"><button type="button" data-n="0" class="${notify ? '' : 'on'}">No</button><button type="button" data-n="1" class="${notify ? 'on' : ''}">Sí</button></div></div>
+          <div class="field span2" id="notifWrap" ${notify ? '' : 'hidden'}><label>¿A quién notificar?</label><div class="userchecks" id="notifUsers"><span class="meta-line">Cargando usuarios…</span></div><small class="meta-line">Recibirán un aviso en la campana cuando la tarea se marque como Lista.</small></div>
+        </div>
+      </div>
     </div>`,
     foot: `${!isNew ? `<button class="btn danger left" data-del>${ICON.trash}Eliminar</button>` : ''}<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${ICON.save}Guardar</button>`,
     onMount(m, close) {
@@ -1053,6 +1105,19 @@ function cardForm(k, colId) {
       const redrawPeople = () => { m.querySelector('#pChips').innerHTML = peopleChips(); };
       const redrawReps = () => { m.querySelector('#repLinks').innerHTML = repLinksHTML(); };
       f('clienteId').onchange = e => { m.querySelector('#ctxtWrap').hidden = !!e.target.value; };
+      m.querySelector('#notifSeg').onclick = e => {
+        const b = e.target.closest('[data-n]'); if (!b) return;
+        notify = b.dataset.n === '1';
+        $$('#notifSeg button', m).forEach(x => x.classList.toggle('on', x === b));
+        m.querySelector('#notifWrap').hidden = !notify;
+      };
+      Api.directory().then(list => {
+        const box = m.querySelector('#notifUsers'); if (!box) return;
+        const users = list.filter(u => u.username !== ME.username && (u.role === 'admin' || (u.modules || []).includes('actividades')));
+        box.innerHTML = users.length ? users.map(u => `<label class="ucheck"><input type="checkbox" value="${esc(u.username)}" ${notifyUsers.has(u.username) ? 'checked' : ''}><span class="avatar" style="background:${hashColor(u.username)}">${esc(initials(u.name || u.username))}</span><span><b>${esc(u.name || u.username)}</b><small>@${esc(u.username)}</small></span></label>`).join('')
+          : '<span class="meta-line">No hay otros usuarios con acceso a Actividades. Créalos en Usuarios.</span>';
+        box.onchange = e => { const c = e.target; if (c.type === 'checkbox') c.checked ? notifyUsers.add(c.value) : notifyUsers.delete(c.value); };
+      }).catch(() => { const box = m.querySelector('#notifUsers'); if (box) box.innerHTML = '<span class="meta-line">No se pudo cargar la lista de usuarios.</span>'; });
       m.querySelector('#cardSw').onclick = e => { const b = e.target.closest('[data-c]'); if (!b) return; color = b.dataset.c; $$('#cardSw .swatch', m).forEach(x => x.classList.toggle('on', x === b)); };
 
       m.querySelector('#pChips').onclick = async e => {
@@ -1109,7 +1174,7 @@ function cardForm(k, colId) {
           R = newReport();
           const c = Store.data.clientes.find(x => x.id === card.clienteId);
           R.codigo = (c?.nombre || card.clienteTxt || '').toUpperCase(); R.clienteId = card.clienteId || '';
-          R.asunto = card.title; R.fecha = card.fecha || todayISO(); R.descripcion = card.notas || '';
+          R.asunto = card.title; R.descripcion = card.notas || '';
           R.participantes = (card.responsables || []).join(' / ');
           R.cardId = cardId;
           R.tipo = card.tipo === 'Levantamiento' ? 'Reporte de Levantamiento' : card.tipo === 'Mantenimiento' ? 'Reporte de Mantenimiento' : 'Reporte de Visita Técnica';
@@ -1125,7 +1190,9 @@ function cardForm(k, colId) {
       function save(silent) {
         const title = f('title').value.trim();
         if (!title) { f('title').classList.add('invalid'); f('title').focus(); toast('Escribe un título para la actividad', true); return false; }
-        const rec = { title, tipo: f('tipo').value, clienteId: f('clienteId').value, clienteTxt: f('clienteId').value ? '' : f('clienteTxt').value.trim(), fecha: f('fecha').value, hora: f('hora').value, responsables: [...resp], direccion: f('direccion').value.trim(), notas: f('notas').value.trim(), color, reportIds: [...k.reportIds], updated: new Date().toISOString() };
+        if (notify && !notifyUsers.size) { toast('Elige al menos un usuario a notificar o marca “No”', true); m.querySelector('#notifWrap').scrollIntoView({ block: 'center', behavior: 'smooth' }); return false; }
+        const rec = { title, tipo: f('tipo').value, clienteId: f('clienteId').value, clienteTxt: f('clienteId').value ? '' : f('clienteTxt').value.trim(), fecha: f('fecha').value, hora: f('hora').value, responsables: [...resp], direccion: f('direccion').value.trim(), notas: f('notas').value.trim(), color, reportIds: [...k.reportIds], moveTo: f('moveTo').value, notify, notifyUsers: notify ? [...notifyUsers] : [], updated: new Date().toISOString() };
+        const wantDone = f('done').checked;
         const toCol = cols.find(c => c.id === f('col').value);
         if (!cardId) { cardId = uid(); toCol.cards.push({ id: cardId, created: new Date().toISOString(), ...rec }); if (!silent) toast('Actividad creada'); }
         else {
@@ -1134,12 +1201,34 @@ function cardForm(k, colId) {
           if (col.id === toCol.id) col.cards[idx] = merged; else { col.cards.splice(idx, 1); toCol.cards.push(merged); }
           if (!silent) toast('Actividad actualizada');
         }
-        Store.save('board'); drawBoard();
+        if (wantDone !== !!(findCard(cardId).card || {}).done) setCardDone(cardId, wantDone);
+        else { Store.save('board'); drawBoard(); }
         return true;
       }
       m.querySelector('[data-save]').onclick = () => { if (save(false)) close(); };
     }
   });
+}
+/* Marca/desmarca una actividad como Lista: mueve a la columna elegida y notifica */
+function setCardDone(id, done, opts = {}) {
+  const { col, card } = findCard(id); if (!card) return;
+  const was = !!card.done;
+  card.done = !!done;
+  if (done && !was) {
+    card.doneAt = new Date().toISOString(); card.doneBy = ME.username; card.demo = false;
+    let movedTo = null;
+    if (!opts.noMove && card.moveTo && card.moveTo !== col.id) {
+      const to = Store.data.board.columns.find(c => c.id === card.moveTo);
+      if (to) { col.cards.splice(col.cards.indexOf(card), 1); to.cards.push(card); movedTo = to.name; }
+    }
+    toast(movedTo ? `Lista ✓ · movida a “${movedTo}”` : 'Actividad marcada como Lista');
+    if (card.notify && (card.notifyUsers || []).length) {
+      Api.notif.send({ to: card.notifyUsers, title: `Tarea Finalizada - ${card.title}`, body: `${ME.name || ME.username}, ha marcado esta tarea como Lista, haz clic para ver detalles`, link: { type: 'card', id: card.id } })
+        .then(r => toast(`Se notificó a ${r.sent} usuario${r.sent === 1 ? '' : 's'}`))
+        .catch(() => toast('No se pudo enviar la notificación', true));
+    }
+  } else if (!done && was) { delete card.doneAt; delete card.doneBy; toast('Actividad desmarcada'); }
+  Store.save('board'); drawBoard();
 }
 function refreshRespFilter() {
   const s = $('#aResp'); if (!s) return;
@@ -1151,16 +1240,33 @@ const TIPOS_DOC = ['Reporte de Visita Técnica', 'Informe de Daños en Obra', 'D
 const ESTADOS = ['OK', 'FALLA', 'OBSERVACIÓN', 'PENDIENTE', 'N/A'];
 function newReport() {
   return {
-    tipo: 'Reporte de Visita Técnica', folio: '', fecha: todayISO(), asunto: '', preparado: 'Ing. Luis Gómez', codigo: '', clienteId: '',
-    participantes: 'L. GÓMEZ (luis.gomez@arquitechtura.com)', distribucion: '', descripcion: '', componentes: [],
+    tipo: 'Reporte de Visita Técnica', folio: '', fecha: todayISO(), asunto: '', preparado: userName(), codigo: '', clienteId: '',
+    participantes: userName(), distribucion: '', descripcion: '', componentes: [],
     concIntro: 'Con base en las pruebas realizadas, se concluye lo siguiente:', conclusiones: [''], recomendacion: '',
     responsable: '', nota: 'Arquitechtura AGIS queda a disposición para generar propuesta de Póliza de Mantenimiento de Sistemas Especiales.',
-    prestNombre: 'Ing. Luis Gómez', prestCargo: 'Gerente de Integraciones – Arquitechtura AGIS', prestFecha: todayISO(), prestFirma: '',
+    prestNombre: userName(), prestCargo: '', prestFecha: todayISO(), prestFirma: '',
     recNombre: '', recCargo: '', recFecha: todayISO(), recFirma: '', savedId: null, cardId: null, fotos: []
   };
 }
 let R = null;
-function loadDraft() { try { const s = localStorage.getItem('agis-report-draft'); if (s) return { ...newReport(), ...JSON.parse(s) }; } catch (_) {} return newReport(); }
+const userName = () => (ME && (ME.name || ME.username)) || '';
+/* Reportes nuevos o borradores: fecha de hoy y "Preparado por" = usuario actual. Migra fotos antiguas a componentes. */
+function normalizeReport(r) {
+  if (!Array.isArray(r.componentes)) r.componentes = [];
+  if (!r.savedId) {
+    const t = todayISO();
+    r.fecha = t; r.prestFecha = t; if (!r.recFirma) r.recFecha = t;
+    r.preparado = userName();
+    if (!r.prestNombre) r.prestNombre = userName();
+  }
+  if (Array.isArray(r.fotos) && r.fotos.length && !r.componentes.some(c => c.foto)) {
+    r.fotos.forEach((f, i) => { const c = r.componentes[i]; if (c && f && f.src) { c.conFoto = true; c.foto = { src: f.src, w: f.w, h: f.h }; c.fotoDesc = f.caption || ''; } });
+  }
+  r.fotos = [];
+  delete r._warned;
+  return r;
+}
+function loadDraft() { try { const s = localStorage.getItem('agis-report-draft'); if (s) return normalizeReport({ ...newReport(), ...JSON.parse(s) }); } catch (_) {} return newReport(); }
 const saveDraft = debounce(() => { try { localStorage.setItem('agis-report-draft', JSON.stringify(R)); } catch (_) {} }, 400);
 
 function suggestFolio() {
@@ -1209,7 +1315,7 @@ function renderReporte(stage) {
       </div>
 
       <div class="card">
-        <div class="sec-h"><span class="n">03</span><h2>Evidencia fotográfica</h2><span class="meta-line">Hasta 2 imágenes</span></div>
+        <div class="sec-h"><span class="n">03</span><h2>Evidencia fotográfica</h2><span class="meta-line">Una foto por componente (opcional)</span></div>
         <div class="fotos" id="fotos"></div>
         <input type="file" id="fotoInput" accept="image/*" hidden>
       </div>
@@ -1276,18 +1382,27 @@ function renderReporte(stage) {
   root.addEventListener('input', e => {
     const f = e.target.dataset.f;
     if (f) { R[f] = e.target.value; e.target.classList.remove('invalid'); if (f === 'codigo') { const c = Store.data.clientes.find(x => x.nombre === e.target.value); R.clienteId = c?.id || ''; } saveDraft(); updateProgress(); }
-    const fc = e.target.dataset.fc;
-    if (fc !== undefined && R.fotos[+fc]) { R.fotos[+fc].caption = e.target.value; saveDraft(); }
+    const cfd = e.target.dataset.cfd;
+    if (cfd !== undefined && R.componentes[+cfd]) {
+      const c = R.componentes[+cfd]; c.fotoDesc = e.target.value; e.target.classList.remove('invalid'); saveDraft(); updateProgress();
+      const st = e.target.closest('.cfoto').querySelector('.cf-state'), ok = c.foto && c.fotoDesc.trim();
+      st.textContent = c.foto ? (ok ? 'Con foto' : 'Falta descripción') : 'Falta la foto'; st.classList.toggle('warn', !ok);
+      if (ok) e.target.closest('.cfoto').classList.remove('invalid');
+    }
     const bi = e.target.dataset.bi;
     if (bi !== undefined) { R.conclusiones[+bi] = e.target.value; saveDraft(); updateProgress(); }
   });
-  root.addEventListener('change', e => { if (e.target.dataset.f === 'tipo') saveDraft(); });
+  root.addEventListener('change', e => {
+    if (e.target.dataset.f === 'tipo') saveDraft();
+    const cf = e.target.dataset.cf;
+    if (cf !== undefined && R.componentes[+cf]) { R.componentes[+cf].conFoto = e.target.checked; saveDraft(); drawFotos(); updateProgress(); }
+  });
   root.addEventListener('click', e => {
     const a = e.target.closest('[data-act]')?.dataset.act;
     if (a === 'folio') { R.folio = suggestFolio(); $('[data-f=folio]').value = R.folio; saveDraft(); return; }
     if (a === 'addcomp') return compForm();
-    if (a === 'addfoto') { $('#fotoInput').click(); return; }
-    const fd = e.target.closest('[data-fdel]'); if (fd) { R.fotos.splice(+fd.dataset.fdel, 1); drawFotos(); saveDraft(); return; }
+    const pick = e.target.closest('[data-cfpick]'); if (pick) { fotoTarget = +pick.dataset.cfpick; $('#fotoInput').click(); return; }
+    const cfdel = e.target.closest('[data-cfdel]'); if (cfdel) { const c = R.componentes[+cfdel.dataset.cfdel]; if (c) { delete c.foto; saveDraft(); drawFotos(); updateProgress(); } return; }
     if (a === 'addbul') { R.conclusiones.push(''); drawBullets(); $$('#bullets textarea').pop().focus(); saveDraft(); return; }
     if (a === 'pdf') return generatePDF();
     if (a === 'save') return saveReport(true);
@@ -1300,19 +1415,20 @@ function renderReporte(stage) {
     const ro = e.target.closest('[data-ropen]'); if (ro) return openSaved(ro.dataset.ropen);
     const rm = e.target.closest('[data-rmore]'); if (rm) return savedMenu(rm);
   });
-  if (!Array.isArray(R.fotos)) R.fotos = [];
+  normalizeReport(R);
   $('#fotoInput').addEventListener('change', async e => {
     const file = e.target.files && e.target.files[0]; e.target.value = '';
-    if (!file) return;
-    if (R.fotos.length >= 2) return toast('Máximo 2 imágenes por reporte', true);
-    const slot = $('.foto-add'); if (slot) { slot.disabled = true; slot.querySelector('b').textContent = 'Procesando…'; }
+    const idx = fotoTarget, comp = R.componentes[idx];
+    if (!file || !comp) return;
+    $$(`[data-cfpick="${idx}"]`).forEach(b => { b.disabled = true; });
+    const slot = $(`.foto-add[data-cfpick="${idx}"] b`); if (slot) slot.textContent = 'Procesando…';
     try {
       const img = await processImage(file);
       const src = await Api.upload(img.data);
-      R.fotos.push({ src, w: img.w, h: img.h, caption: '' });
-      saveDraft(); toast('Foto agregada');
+      comp.foto = { src, w: img.w, h: img.h }; comp.conFoto = true;
+      saveDraft(); toast('Foto agregada a ' + comp.sistema);
     } catch (err) { console.error(err); toast(err.message && err.status ? err.message : 'No se pudo leer la imagen (usa JPG o PNG)', true); }
-    drawFotos();
+    drawFotos(); updateProgress();
   });
   drawComps(); drawBullets(); drawSaved(); drawFotos();
   pads = {};
@@ -1334,17 +1450,29 @@ function drawComps() {
       </div>
     </div>`).join('')
     : `<div class="empty" style="padding:28px">${ICON.report}<b>Sin componentes</b>Agrega cada sistema o componente revisado con su estado y hallazgo.</div>`;
+  drawFotos();
   updateProgress();
 }
+let fotoTarget = -1;
 function drawFotos() {
   const el = $('#fotos'); if (!el) return;
-  let html = R.fotos.map((f, i) => `
-    <figure class="foto">
-      <div class="foto-img"><img src="${esc(f.src)}" alt="Evidencia ${i + 1}"><button class="icon-btn danger foto-del" data-fdel="${i}" title="Quitar foto">${ICON.trash}</button></div>
-      <input class="input" data-fc="${i}" value="${esc(f.caption || '')}" placeholder="Descripción de la foto (opcional)" maxlength="140">
-    </figure>`).join('');
-  if (R.fotos.length < 2) html += `<button class="foto-add" data-act="addfoto">${ICON.camera}<b>Agregar foto</b><small>Toma una foto o elige de la galería</small></button>`;
-  el.innerHTML = html;
+  el.innerHTML = R.componentes.length ? R.componentes.map((c, i) => `
+    <div class="cfoto ${c.conFoto ? 'on' : ''}">
+      <label class="cf-head">
+        <input type="checkbox" data-cf="${i}" ${c.conFoto ? 'checked' : ''}>
+        <span class="cf-name"><b>${esc(c.sistema)}</b><span class="est est-${esc(c.estado)}">${esc(c.estado)}</span></span>
+        <span class="cf-state ${c.conFoto && (!c.foto || !String(c.fotoDesc || '').trim()) ? 'warn' : ''}">${c.conFoto ? (c.foto ? (String(c.fotoDesc || '').trim() ? 'Con foto' : 'Falta descripción') : 'Falta la foto') : 'Sin foto'}</span>
+      </label>
+      ${c.conFoto ? `<div class="cf-body">
+        ${c.foto ? `<div class="cf-thumb"><img src="${esc(c.foto.src)}" alt="Foto de ${esc(c.sistema)}"></div>`
+          : `<button type="button" class="foto-add cf-pick" data-cfpick="${i}">${ICON.camera}<b>Seleccionar foto</b><small>Cámara o galería</small></button>`}
+        <div class="cf-fields">
+          <div class="field"><label>Descripción de la foto <span class="req">*</span></label><input class="input" data-cfd="${i}" value="${esc(c.fotoDesc || '')}" maxlength="140" placeholder="Qué se observa en la imagen"></div>
+          ${c.foto ? `<div class="cf-acts"><button type="button" class="btn sm" data-cfpick="${i}">${ICON.camera}Reemplazar</button><button type="button" class="btn sm danger" data-cfdel="${i}">${ICON.trash}Eliminar foto</button></div>` : ''}
+        </div>
+      </div>` : ''}
+    </div>`).join('')
+    : `<div class="empty" style="padding:24px">${ICON.camera}<b>Primero agrega componentes</b>En la sección 02. Después podrás adjuntar una foto por cada componente.</div>`;
 }
 async function processImage(file) {
   const url = URL.createObjectURL(file);
@@ -1403,7 +1531,7 @@ function compForm(i) {
         const s = m.querySelector('[name=sistema]');
         if (!s.value.trim()) { s.classList.add('invalid'); s.focus(); return; }
         const rec = { sistema: s.value.trim(), estado, observacion: m.querySelector('[name=observacion]').value.trim() };
-        if (isNew) R.componentes.push(rec); else R.componentes[i] = rec;
+        if (isNew) R.componentes.push(rec); else R.componentes[i] = { ...R.componentes[i], ...rec };
         drawComps(); saveDraft(); close();
       };
     }
@@ -1459,14 +1587,16 @@ function trimmedPNG(cv) {
   return out.toDataURL('image/png');
 }
 function reportChecks() {
+  const fotosOk = R.componentes.length > 0 && R.componentes.every(c => !c.conFoto || (c.foto && String(c.fotoDesc || '').trim()));
   return [
-    ['Datos generales', !!(R.fecha && R.asunto.trim() && R.codigo.trim())],
-    ['Descripción de la falla', !!R.descripcion.trim()],
+    ['Datos generales', !!(R.fecha && String(R.asunto || '').trim() && String(R.codigo || '').trim() && String(R.preparado || '').trim())],
+    ['Descripción de la falla', !!String(R.descripcion || '').trim()],
     ['Diagnóstico por componente', R.componentes.length > 0],
+    ['Evidencia fotográfica', fotosOk],
     ['Conclusiones', R.conclusiones.some(s => s.trim())],
-    ['Seguimiento', !!R.responsable.trim()],
-    ['Firma del prestador', !!R.prestFirma],
-    ['Firma de quien recibe', !!R.recFirma]
+    ['Seguimiento', !!String(R.responsable || '').trim()],
+    ['Firma del prestador', !!R.prestFirma && !!String(R.prestNombre || '').trim()],
+    ['Firma de quien recibe', !!R.recFirma && !!String(R.recNombre || '').trim()]
   ];
 }
 function updateProgress() {
@@ -1476,14 +1606,41 @@ function updateProgress() {
   $('#progTxt').textContent = `${ok}/${ch.length}`;
   $('#checklist').innerHTML = ch.map(([l, v]) => `<li class="${v ? 'ok' : ''}">${l}</li>`).join('');
 }
+/* Validación estricta: sin todos los apartados no se guarda ni se genera (no hay forma de saltarla) */
 function validateReport() {
-  const req = ['fecha', 'asunto', 'codigo', 'descripcion'];
+  const miss = [];
+  const mark = sel => { const el = $(sel); if (el) el.classList.add('invalid'); return el; };
   let first = null;
-  req.forEach(f => { const el = $(`[data-f=${f}]`); if (!String(R[f] || '').trim()) { el.classList.add('invalid'); first = first || el; } });
-  if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); setTimeout(() => first.focus({ preventScroll: true }), 300); toast('Completa los campos obligatorios', true); return false; }
-  return true;
+  const need = (cond, label, sel) => { if (!cond) { miss.push(label); const el = sel ? mark(sel) : null; first = first || el; } };
+  need(R.fecha, 'Fecha', '[data-f=fecha]');
+  need(String(R.preparado || '').trim(), 'Preparado por', '[data-f=preparado]');
+  need(String(R.asunto || '').trim(), 'Asunto', '[data-f=asunto]');
+  need(String(R.codigo || '').trim(), 'Código (cliente / proyecto)', '[data-f=codigo]');
+  need(String(R.descripcion || '').trim(), '01 · Descripción de la falla', '[data-f=descripcion]');
+  need(R.componentes.length, '02 · Al menos un componente en el diagnóstico', '#compList');
+  R.componentes.forEach((c, i) => {
+    if (!c.conFoto) return;
+    if (!c.foto) need(false, `03 · Foto de “${c.sistema}”`, `.cfoto:nth-child(${i + 1})`);
+    else if (!String(c.fotoDesc || '').trim()) need(false, `03 · Descripción de la foto de “${c.sistema}”`, `[data-cfd="${i}"]`);
+  });
+  need(R.conclusiones.some(x => x.trim()), '04 · Al menos una conclusión', '#bullets textarea');
+  need(String(R.responsable || '').trim(), '05 · Responsable del seguimiento', '[data-f=responsable]');
+  need(R.prestFirma, '06 · Firma del prestador de servicio', '[data-sig=prestFirma]');
+  need(String(R.prestNombre || '').trim(), '06 · Nombre del prestador', '[data-f=prestNombre]');
+  need(R.recFirma, '06 · Firma de quien recibe', '[data-sig=recFirma]');
+  need(String(R.recNombre || '').trim(), '06 · Nombre de quien recibe', '[data-f=recNombre]');
+  if (!miss.length) return true;
+  if (first) { first.scrollIntoView({ behavior: 'smooth', block: 'center' }); if (first.focus && /INPUT|TEXTAREA/.test(first.tagName)) setTimeout(() => first.focus({ preventScroll: true }), 300); }
+  openModal({
+    title: 'Faltan datos en el reporte', size: 'narrow',
+    body: `<p>Para guardar o generar el PDF completa:</p><ul class="miss-list">${miss.map(m => `<li>${esc(m)}</li>`).join('')}</ul>`,
+    foot: `<button class="btn primary" data-x>Entendido</button>`
+  });
+  return false;
 }
+let repBusy = false;
 function saveReport(notify) {
+  if (notify) { if (repBusy) return; if (!validateReport()) return; }
   if (!R.folio) { R.folio = suggestFolio(); const el = $('[data-f=folio]'); if (el) el.value = R.folio; }
   const rec = { id: R.savedId || uid(), folio: R.folio, tipo: R.tipo, fecha: R.fecha, codigo: R.codigo, asunto: R.asunto, updated: new Date().toISOString(), data: { ...R } };
   R.savedId = rec.id; rec.data.savedId = rec.id;
@@ -1498,9 +1655,10 @@ function saveReport(notify) {
   if (notify) toast('Reporte guardado');
 }
 async function generatePDF() {
+  if (repBusy) return;
   if (!validateReport()) return;
-  if (!R.recFirma && !R._warned) { R._warned = true; toast('Aviso: falta la firma de quien recibe. Vuelve a pulsar para generar así.'); return; }
-  delete R._warned;
+  repBusy = true;
+  const btn = $('[data-act=pdf]'); if (btn) { btn.disabled = true; btn.lastChild.textContent = 'Generando…'; }
   saveReport(false);
   try {
     const doc = await makePDF(R);
@@ -1508,6 +1666,7 @@ async function generatePDF() {
     doc.save(name);
     toast('PDF generado: ' + name);
   } catch (err) { console.error(err); toast(err.message || 'Error al generar el PDF', true); }
+  finally { repBusy = false; if (btn) { btn.disabled = false; btn.lastChild.textContent = 'Generar PDF'; } }
 }
 async function resetReport() {
   if (!await confirmDialog('Nuevo reporte', 'Se limpiará el formulario actual. Si no lo guardaste, se perderá.', 'Limpiar', false)) return;
@@ -1525,7 +1684,7 @@ function drawSaved() {
 function openSaved(id) { openReport(id); }
 function openReport(id) {
   const r = Store.data.reportes.find(x => x.id === id); if (!r) return toast('El reporte ya no existe', true);
-  R = { ...newReport(), ...r.data, savedId: r.id }; saveDraft();
+  R = normalizeReport({ ...newReport(), ...r.data, savedId: r.id }); saveDraft();
   if (current === 'reporte') renderReporte($('#stage')); else go('reporte');
   toast('Reporte abierto: ' + (r.folio || ''));
 }
@@ -1545,9 +1704,305 @@ function savedMenu(btn) {
   popMenu(btn, [
     { label: 'Abrir / editar', icon: 'open', run: () => openSaved(id) },
     { label: 'Descargar PDF', icon: 'download', run: () => downloadReport(id) },
-    { label: 'Duplicar como nuevo', icon: 'copy', run: () => { R = { ...newReport(), ...r.data, savedId: null, cardId: null, fotos: [], folio: '', prestFirma: '', recFirma: '', fecha: todayISO(), prestFecha: todayISO(), recFecha: todayISO() }; saveDraft(); renderReporte($('#stage')); } },
+    { label: 'Duplicar como nuevo', icon: 'copy', run: () => { R = normalizeReport({ ...newReport(), ...r.data, savedId: null, cardId: null, fotos: [], folio: '', prestFirma: '', recFirma: '', recNombre: '', recCargo: '', componentes: (r.data.componentes || []).map(c => ({ sistema: c.sistema, estado: c.estado, observacion: c.observacion })) }); saveDraft(); renderReporte($('#stage')); } },
     '-',
     { label: 'Eliminar', icon: 'trash', danger: true, run: async () => { if (!await confirmDialog('Eliminar reporte', `¿Eliminar el reporte <b>${esc(r.folio)}</b>?`)) return; Store.data.reportes = Store.data.reportes.filter(x => x.id !== id); if (R.savedId === id) R.savedId = null; Store.data.board.columns.forEach(c => c.cards.forEach(k => { if (k.reportIds) k.reportIds = k.reportIds.filter(x => x !== id); })); Store.save('reportes'); Store.save('board'); drawSaved(); } }
+  ]);
+}
+
+/* ================= PRESUPUESTO (visita técnica) ================= */
+const BANK = {
+  banco: 'BANCOMER', titular: 'ARQUITECHTURA AGIS S.A. DE C.V.',
+  mxnCuenta: '0163075710', mxnClabe: '012 180 00163075710 6',
+  usdCuenta: '0165308852', usdClabe: '012 180 00165308852 2',
+  contacto: 'lilia.ortiz@arquitechtura.com · Oficina (55) 5545 5054 Ext. 109'
+};
+const OBS_DEFAULT = [
+  'Esta propuesta no incluye el diseño de planos constructivos, en caso de ser requeridos se enviará la propuesta respectiva.',
+  'Se requerirán instalaciones eléctricas adicionales.',
+  'No se incluyen trabajos de canalizaciones, albañilería, carpintería, ni de obra civil.',
+  'Se considera la realización de los trabajos en días y horarios hábiles, lunes a viernes, 9:00am a 6:00pm, Sábados, 9:00am a 2:00pm.',
+  'Se deberá revisar la propuesta de acuerdo a los requerimientos definitivos del cliente final.'
+];
+const UNIDADES = ['LOTE', 'SERV', 'PZA', 'JGO', 'KIT', 'HR', 'M', 'M2'];
+function newBudget() {
+  return {
+    folio: '', rev: 0, clienteId: '', clienteNombre: '', fecha: todayISO(), obra: '', lugar: 'Ciudad de México, CDMX',
+    sistemaNombre: 'SISTEMA GENERAL', sistemaCodigo: 'SGN', sistemas: 'SISTEMA GENERAL (SGN)', titulo: '',
+    moneda: 'MXN', iva: 16, partidas: [],
+    condPago: '100% con la aprobación del presupuesto.', garantia: '1 año contra defectos de fabricación.', vigencia: '30 días.',
+    observaciones: [...OBS_DEFAULT], banco: { ...BANK }, director: 'ING. ISAAC SHTURMAN', savedId: null
+  };
+}
+let PB = null;
+function loadBudgetDraft() {
+  try { const s = localStorage.getItem('agis-budget-draft'); if (s) { const b = { ...newBudget(), ...JSON.parse(s) }; if (!b.savedId) b.fecha = todayISO(); return b; } } catch (_) {}
+  return newBudget();
+}
+const saveBudgetDraft = debounce(() => { try { localStorage.setItem('agis-budget-draft', JSON.stringify(PB)); } catch (_) {} }, 400);
+const curFmt = (n, cur) => '$' + AGIS_money(n) + ' ' + (cur || PB.moneda);
+function suggestBudgetFolio() {
+  const base = (PB.obra || PB.clienteNombre || 'AGIS').trim().replace(/\s+/g, ' ');
+  const pre = `${base}-${(PB.sistemaCodigo || 'SGN').toUpperCase()}-VT-`;
+  const n = Store.data.presupuestos.filter(x => (x.folio || '').startsWith(pre) && x.id !== PB.savedId).map(x => parseInt((x.folio.slice(pre.length).match(/^\d+/) || ['0'])[0], 10)).reduce((a, b) => Math.max(a, b), 0) + 1;
+  return `${pre}${String(n).padStart(3, '0')}_Rev.${PB.rev || 0}`;
+}
+function renderPresupuesto(stage) {
+  if (!PB) PB = loadBudgetDraft();
+  const clientes = [...Store.data.clientes].sort((a, b) => a.nombre.localeCompare(b.nombre));
+  stage.innerHTML = `
+  <section id="presupuesto" class="rep-layout">
+    <div>
+      <div class="card">
+        <div class="rep-hero">
+          <div><img src="${window.AGIS_LOGOS ? AGIS_LOGOS.wordmark : ''}" alt="arquitechtura"></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div class="field"><label>Moneda</label><div class="seg" id="curSeg"><button type="button" data-cur="MXN">Pesos (MXN)</button><button type="button" data-cur="USD">Dólares (USD)</button></div></div>
+            <div class="field" style="width:290px;max-width:100%"><label>Concurso No. / Folio</label><div style="display:flex;gap:6px"><input class="input" data-b="folio" placeholder="Obra-SGN-VT-001_Rev.0"><button class="icon-btn" data-act="bfolio" title="Sugerir folio" style="height:42px;width:42px;border:1px solid var(--line);flex:none">${ICON.wand}</button></div></div>
+          </div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Cliente <span class="req">*</span></label><select class="input" data-b="clienteId"><option value="">Seleccionar cliente…</option>${clientes.map(c => `<option value="${esc(c.id)}">${esc(c.nombre)} · ${esc(c.id)}</option>`).join('')}</select></div>
+          <div class="field"><label>Fecha <span class="req">*</span></label><input class="input" type="date" data-b="fecha"></div>
+          <div class="field"><label>Obra <span class="req">*</span></label><input class="input" data-b="obra" placeholder="Ej. Real del Country 12"></div>
+          <div class="field"><label>Lugar</label><input class="input" data-b="lugar"></div>
+          <div class="field"><label>Sistema</label><div style="display:flex;gap:8px"><input class="input" data-b="sistemaNombre" placeholder="SISTEMA GENERAL"><input class="input mono" data-b="sistemaCodigo" placeholder="SGN" style="width:90px;flex:none" maxlength="6"></div></div>
+          <div class="field"><label>Sistemas (texto en el documento)</label><input class="input" data-b="sistemas" placeholder="SISTEMA GENERAL (SGN)"></div>
+          <div class="field span2"><label>Título del presupuesto <span class="req">*</span></label><input class="input" data-b="titulo" placeholder="Ej. Visita técnica para revisión de control de acceso y red WiFi"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="sec-h"><span class="n">01</span><h2>Partidas</h2><button class="btn sm primary" data-act="addpart">${ICON.plus}Agregar partida</button></div>
+        <div id="partList"></div>
+      </div>
+
+      <div class="card">
+        <div class="sec-h"><span class="n">02</span><h2>Notas</h2></div>
+        <div class="grid2">
+          <div class="field span2"><label>Precios</label><div class="ro-line" id="preciosTxt"></div></div>
+          <div class="field span2"><label>Condiciones de pago <span class="req">*</span></label><input class="input" data-b="condPago"></div>
+          <div class="field"><label>Garantía <span class="req">*</span></label><input class="input" data-b="garantia"></div>
+          <div class="field"><label>Vigencia de cotización <span class="req">*</span></label><input class="input" data-b="vigencia"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="sec-h"><span class="n">03</span><h2>Observaciones</h2></div>
+        <div class="bullets" id="obsList"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px"><button class="btn sm ghost" data-act="addobs">${ICON.plus}Agregar observación</button><button class="btn sm ghost" data-act="resetobs">${ICON.reset}Restaurar leyendas</button></div>
+      </div>
+
+      <div class="card">
+        <div class="sec-h"><span class="n">04</span><h2>Datos bancarios</h2><span class="meta-line">Informativo</span></div>
+        <div class="bank-grid">
+          <div><small>Banco y titular</small><b>${esc(BANK.banco)}</b><span>${esc(BANK.titular)}</span></div>
+          <div><small>Moneda nacional (MXN)</small><b>Cuenta ${esc(BANK.mxnCuenta)}</b><span>CLABE ${esc(BANK.mxnClabe)}</span></div>
+          <div><small>Dólares (USD)</small><b>Cuenta ${esc(BANK.usdCuenta)}</b><span>CLABE ${esc(BANK.usdClabe)}</span></div>
+        </div>
+        <p class="meta-line" style="margin:12px 0 0">Contacto: ${esc(BANK.contacto)} · Firma: Director General, ${esc(PB.director)}</p>
+      </div>
+    </div>
+
+    <aside class="rep-side">
+      <div class="card">
+        <b style="font-size:14px;display:block;margin-bottom:12px">Resumen</b>
+        <div class="tot-rows">
+          <div><span>Subtotal</span><b id="tSub"></b></div>
+          <div><span>IVA <input class="input iva-in" type="number" min="0" max="100" step="1" data-b="iva">%</span><b id="tIva"></b></div>
+          <div class="tot-main"><span>Total</span><b id="tTot"></b></div>
+        </div>
+        <p class="tot-letras" id="tLetras"></p>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
+          <button class="btn primary" data-act="bpdf" style="justify-content:center;height:46px">${ICON.pdf}Generar PDF</button>
+          <div style="display:flex;gap:8px"><button class="btn" data-act="bsave" style="flex:1;justify-content:center">${ICON.save}Guardar</button><button class="btn" data-act="bnew" style="flex:1;justify-content:center">${ICON.reset}Nuevo</button></div>
+        </div>
+      </div>
+      <div class="card recent">
+        <b style="font-size:14px;display:block;margin-bottom:8px">Presupuestos guardados</b>
+        <div class="rep-list" id="budList"></div>
+      </div>
+    </aside>
+  </section>`;
+  const root = $('#presupuesto');
+  $$('[data-b]', root).forEach(el => { el.value = PB[el.dataset.b] ?? ''; });
+  root.addEventListener('input', e => {
+    const k = e.target.dataset.b;
+    if (k) {
+      PB[k] = k === 'iva' ? Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) : e.target.value;
+      e.target.classList.remove('invalid');
+      if (k === 'sistemaNombre' || k === 'sistemaCodigo') { PB.sistemas = `${PB.sistemaNombre || 'SISTEMA GENERAL'} (${(PB.sistemaCodigo || 'SGN').toUpperCase()})`; const sx = $('[data-b=sistemas]'); if (sx) sx.value = PB.sistemas; }
+      saveBudgetDraft(); drawBudgetTotals();
+    }
+    const oi = e.target.dataset.oi;
+    if (oi !== undefined) { PB.observaciones[+oi] = e.target.value; saveBudgetDraft(); }
+  });
+  root.addEventListener('change', e => {
+    if (e.target.dataset.b === 'clienteId') { const c = Store.data.clientes.find(x => x.id === e.target.value); PB.clienteNombre = c ? c.nombre : ''; if (c && !PB.obra) { PB.obra = c.nombre; $('[data-b=obra]').value = c.nombre; } saveBudgetDraft(); }
+  });
+  root.addEventListener('click', e => {
+    const cur = e.target.closest('[data-cur]'); if (cur) { PB.moneda = cur.dataset.cur; saveBudgetDraft(); drawBudgetTotals(); return; }
+    const a = e.target.closest('[data-act]')?.dataset.act;
+    if (a === 'bfolio') { PB.folio = suggestBudgetFolio(); $('[data-b=folio]').value = PB.folio; $('[data-b=folio]').classList.remove('invalid'); saveBudgetDraft(); return; }
+    if (a === 'addpart') return partForm();
+    if (a === 'addobs') { PB.observaciones.push(''); drawObs(); $$('#obsList textarea').pop().focus(); saveBudgetDraft(); return; }
+    if (a === 'resetobs') { PB.observaciones = [...OBS_DEFAULT]; drawObs(); saveBudgetDraft(); return; }
+    if (a === 'bpdf') return generateBudgetPDF();
+    if (a === 'bsave') return saveBudget(true);
+    if (a === 'bnew') return resetBudget();
+    const od = e.target.closest('[data-odel]'); if (od) { PB.observaciones.splice(+od.dataset.odel, 1); drawObs(); saveBudgetDraft(); return; }
+    const pe = e.target.closest('[data-pedit]'); if (pe) return partForm(+pe.dataset.pedit);
+    const pd = e.target.closest('[data-pdel]'); if (pd) return delPart(+pd.dataset.pdel);
+    const pu = e.target.closest('[data-pup]'); if (pu) { const i = +pu.dataset.pup; if (i > 0) { [PB.partidas[i - 1], PB.partidas[i]] = [PB.partidas[i], PB.partidas[i - 1]]; drawParts(); saveBudgetDraft(); } return; }
+    const bo = e.target.closest('[data-bopen]'); if (bo) return openBudget(bo.dataset.bopen);
+    const bm = e.target.closest('[data-bmore]'); if (bm) return budgetMenu(bm);
+  });
+  drawParts(); drawObs(); drawBudgetTotals(); drawBudgets();
+}
+function drawParts() {
+  const el = $('#partList'); if (!el) return;
+  if (!PB.partidas.length) { el.innerHTML = `<div class="empty" style="padding:26px">${ICON.cash}<b>Sin partidas</b>Agrega los conceptos del presupuesto con su unidad, cantidad y precio.</div>`; drawBudgetTotals(); return; }
+  let html = '<div class="parts">', last = null;
+  PB.partidas.forEach((p, i) => {
+    const sec = (p.seccion || 'GENERAL').toUpperCase();
+    if (sec !== last) { html += `<div class="part-sec">${esc(sec)}</div>`; last = sec; }
+    const imp = (+p.cantidad || 0) * (+p.precio || 0);
+    html += `<div class="part">
+      <span class="part-code mono">${esc(p.codigo || '—')}</span>
+      <span class="part-con">${esc(p.concepto)}</span>
+      <span class="part-q"><small>${esc(p.unidad || '')}</small>${AGIS_money(p.cantidad)} × ${AGIS_money(p.precio)}</span>
+      <b class="part-imp">${AGIS_money(imp)}</b>
+      <span class="acts"><button class="icon-btn" data-pup="${i}" title="Subir" ${i === 0 ? 'disabled style="opacity:.3"' : ''}>${ICON.up}</button><button class="icon-btn" data-pedit="${i}" title="Editar">${ICON.edit}</button><button class="icon-btn danger" data-pdel="${i}" title="Eliminar">${ICON.trash}</button></span>
+    </div>`;
+  });
+  el.innerHTML = html + '</div>';
+  drawBudgetTotals();
+}
+function drawObs() {
+  const el = $('#obsList'); if (!el) return;
+  el.innerHTML = PB.observaciones.map((t, i) => `<div class="bullet-row"><span class="tri"></span><textarea class="input" rows="1" data-oi="${i}" placeholder="Observación">${esc(t)}</textarea><button class="icon-btn danger" data-odel="${i}" title="Quitar" style="margin-top:4px">${ICON.x}</button></div>`).join('') || '<span class="meta-line">Sin observaciones.</span>';
+}
+function drawBudgetTotals() {
+  if (!$('#tSub')) return;
+  const t = AGIS_budgetTotals(PB);
+  $('#tSub').textContent = curFmt(t.subtotal); $('#tIva').textContent = curFmt(t.iva); $('#tTot').textContent = curFmt(t.total);
+  $('#tLetras').textContent = AGIS_importeLetras(t.total, PB.moneda);
+  $('#preciosTxt').textContent = `Precios en ${PB.moneda === 'USD' ? 'Dólares USD' : 'Pesos MXN'} pagaderos al día de facturación.`;
+  $$('#curSeg button').forEach(b => b.classList.toggle('on', b.dataset.cur === PB.moneda));
+}
+function partForm(i) {
+  const isNew = i === undefined;
+  const code = (PB.sistemaCodigo || 'SGN').toUpperCase();
+  const nextCode = `${code}-P-${String(PB.partidas.filter(p => (p.codigo || '').startsWith(code + '-P-')).length + 1).padStart(3, '0')}`;
+  const p = isNew ? { codigo: nextCode, seccion: PB.partidas.length ? PB.partidas[PB.partidas.length - 1].seccion : 'VISITA TÉCNICA', concepto: '', unidad: 'LOTE', cantidad: 1, precio: '' } : { ...PB.partidas[i] };
+  const secciones = [...new Set(['VISITA TÉCNICA', 'MATERIALES', 'MANO DE OBRA', 'EQUIPOS', ...PB.partidas.map(x => (x.seccion || '').toUpperCase()).filter(Boolean)])];
+  openModal({
+    title: isNew ? 'Agregar partida' : 'Editar partida', size: 'wide',
+    body: `<div class="grid2">
+      <div class="field"><label>Código</label><input class="input mono" name="codigo" value="${esc(p.codigo)}"></div>
+      <div class="field"><label>Sección</label><input class="input" name="seccion" list="secList" value="${esc(p.seccion)}"><datalist id="secList">${secciones.map(x => `<option value="${esc(x)}">`).join('')}</datalist></div>
+      <div class="field span2"><label>Concepto <span class="req">*</span></label><textarea class="input" name="concepto" rows="3" autofocus placeholder="Descripción del trabajo o suministro">${esc(p.concepto)}</textarea></div>
+      <div class="field"><label>Unidad</label><input class="input" name="unidad" list="uniList" value="${esc(p.unidad)}"><datalist id="uniList">${UNIDADES.map(x => `<option value="${x}">`).join('')}</datalist></div>
+      <div class="field"><label>Cantidad <span class="req">*</span></label><input class="input" name="cantidad" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.cantidad)}"></div>
+      <div class="field"><label>Precio unitario (${PB.moneda}) <span class="req">*</span></label><input class="input" name="precio" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.precio)}"></div>
+      <div class="field"><label>Importe</label><div class="ro-line" id="impPrev"></div></div>
+    </div>`,
+    foot: `<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${isNew ? 'Agregar' : 'Guardar'}</button>`,
+    onMount(m, close) {
+      const f = n => m.querySelector(`[name=${n}]`);
+      const upd = () => { m.querySelector('#impPrev').textContent = curFmt((parseFloat(f('cantidad').value) || 0) * (parseFloat(f('precio').value) || 0)); };
+      f('cantidad').oninput = upd; f('precio').oninput = upd; upd();
+      m.querySelector('[data-save]').onclick = () => {
+        const con = f('concepto').value.trim(), q = parseFloat(f('cantidad').value), pu = parseFloat(f('precio').value);
+        let bad = null;
+        if (!con) bad = bad || f('concepto');
+        if (!(q > 0)) bad = bad || f('cantidad');
+        if (!(pu >= 0) || f('precio').value === '') bad = bad || f('precio');
+        if (bad) { bad.classList.add('invalid'); bad.focus(); return; }
+        const rec = { codigo: f('codigo').value.trim(), seccion: (f('seccion').value.trim() || 'GENERAL').toUpperCase(), concepto: con, unidad: f('unidad').value.trim().toUpperCase(), cantidad: q, precio: Math.round(pu * 100) / 100 };
+        if (isNew) PB.partidas.push({ id: uid(), ...rec }); else PB.partidas[i] = { ...PB.partidas[i], ...rec };
+        drawParts(); saveBudgetDraft(); close();
+      };
+    }
+  });
+}
+async function delPart(i) {
+  if (!await confirmDialog('Eliminar partida', `¿Eliminar la partida <b>${esc(PB.partidas[i].codigo || PB.partidas[i].concepto)}</b>?`)) return;
+  PB.partidas.splice(i, 1); drawParts(); saveBudgetDraft();
+}
+function validateBudget() {
+  const miss = []; let first = null;
+  const need = (cond, label, sel) => { if (!cond) { miss.push(label); const el = sel && $(sel); if (el) { el.classList.add('invalid'); first = first || el; } } };
+  need(PB.clienteId, 'Cliente', '[data-b=clienteId]');
+  need(PB.fecha, 'Fecha', '[data-b=fecha]');
+  need(String(PB.obra || '').trim(), 'Obra', '[data-b=obra]');
+  need(String(PB.titulo || '').trim(), 'Título del presupuesto', '[data-b=titulo]');
+  need(PB.partidas.length, '01 · Al menos una partida', '#partList');
+  need(String(PB.condPago || '').trim(), '02 · Condiciones de pago', '[data-b=condPago]');
+  need(String(PB.garantia || '').trim(), '02 · Garantía', '[data-b=garantia]');
+  need(String(PB.vigencia || '').trim(), '02 · Vigencia de cotización', '[data-b=vigencia]');
+  if (!miss.length) return true;
+  if (first) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  openModal({ title: 'Faltan datos en el presupuesto', size: 'narrow', body: `<p>Para guardar o generar el PDF completa:</p><ul class="miss-list">${miss.map(m => `<li>${esc(m)}</li>`).join('')}</ul>`, foot: `<button class="btn primary" data-x>Entendido</button>` });
+  return false;
+}
+let budBusy = false;
+function saveBudget(notify) {
+  if (budBusy || !validateBudget()) return false;
+  if (!String(PB.folio || '').trim()) { PB.folio = suggestBudgetFolio(); const el = $('[data-b=folio]'); if (el) el.value = PB.folio; }
+  const c = Store.data.clientes.find(x => x.id === PB.clienteId); if (c) PB.clienteNombre = c.nombre;
+  const t = AGIS_budgetTotals(PB);
+  const rec = { id: PB.savedId || uid(), folio: PB.folio, fecha: PB.fecha, clienteId: PB.clienteId, clienteNombre: PB.clienteNombre, titulo: PB.titulo, total: t.total, moneda: PB.moneda, updated: new Date().toISOString(), by: ME.username, data: null };
+  PB.savedId = rec.id; rec.data = { ...PB };
+  const i = Store.data.presupuestos.findIndex(x => x.id === rec.id);
+  if (i >= 0) Store.data.presupuestos[i] = rec; else Store.data.presupuestos.unshift(rec);
+  Store.save('presupuestos'); saveBudgetDraft(); drawBudgets();
+  if (notify) toast('Presupuesto guardado');
+  return true;
+}
+async function makeBudgetPDF(d) {
+  if (!window.jspdf || !window.jspdf.jsPDF) throw new Error('No se pudo cargar el generador de PDF (revisa la conexión)');
+  await loadPdfFonts();
+  return buildBudgetPDF({ ...d, banco: { ...BANK, ...(d.banco || {}) } }, { jsPDF: window.jspdf.jsPDF, logos: window.AGIS_LOGOS, fonts: window.AGIS_PDF_FONTS });
+}
+const budgetFile = f => `${(f || 'Presupuesto').replace(/[^\w\-.]+/g, '_')}.pdf`;
+async function generateBudgetPDF() {
+  if (budBusy) return;
+  if (!saveBudget(false)) return;
+  budBusy = true;
+  const btn = $('[data-act=bpdf]'); if (btn) { btn.disabled = true; btn.lastChild.textContent = 'Generando…'; }
+  try { (await makeBudgetPDF(PB)).save(budgetFile(PB.folio)); toast('PDF generado: ' + budgetFile(PB.folio)); }
+  catch (e) { console.error(e); toast(e.message || 'Error al generar el PDF', true); }
+  finally { budBusy = false; if (btn) { btn.disabled = false; btn.lastChild.textContent = 'Generar PDF'; } }
+}
+async function resetBudget() {
+  if (!await confirmDialog('Nuevo presupuesto', 'Se limpiará el formulario actual. Si no lo guardaste, se perderá.', 'Limpiar', false)) return;
+  PB = newBudget(); saveBudgetDraft(); renderPresupuesto($('#stage'));
+}
+function drawBudgets() {
+  const el = $('#budList'); if (!el) return;
+  el.innerHTML = Store.data.presupuestos.length ? Store.data.presupuestos.map(b => `
+    <div class="rep-item">
+      <span class="est" style="background:#e9f7ef;color:#15803d">${ICON.cash.replace('width="20" height="20"', 'width="15" height="15"')}</span>
+      <div class="info" data-bopen="${b.id}" style="cursor:pointer"><b>${esc(b.folio || 'Sin folio')}</b><small>${fmtDate(b.fecha)} · ${esc(b.clienteNombre || '')} · $${AGIS_money(b.total)} ${esc(b.moneda || '')}</small></div>
+      <button class="icon-btn" data-bmore="${b.id}">${ICON.more}</button>
+    </div>`).join('') : `<div class="meta-line" style="padding:8px">Aún no hay presupuestos guardados.</div>`;
+}
+function openBudget(id) {
+  const b = Store.data.presupuestos.find(x => x.id === id); if (!b || !b.data) return toast('El presupuesto ya no existe', true);
+  PB = { ...newBudget(), ...b.data, savedId: b.id }; saveBudgetDraft();
+  if (current === 'presupuesto') renderPresupuesto($('#stage')); else go('presupuesto');
+  toast('Presupuesto abierto: ' + (b.folio || ''));
+}
+function budgetMenu(btn) {
+  const id = btn.dataset.bmore, b = Store.data.presupuestos.find(x => x.id === id);
+  popMenu(btn, [
+    { label: 'Abrir / editar', icon: 'open', run: () => openBudget(id) },
+    { label: 'Descargar PDF', icon: 'download', run: async () => { try { (await makeBudgetPDF(b.data)).save(budgetFile(b.folio)); } catch (e) { toast(e.message || 'Error al generar el PDF', true); } } },
+    { label: 'Nueva revisión', icon: 'copy', run: () => { const rev = (+b.data.rev || 0) + 1; PB = { ...newBudget(), ...b.data, savedId: null, rev, fecha: todayISO(), folio: String(b.data.folio || '').replace(/_Rev\.\d+$/, '') + '_Rev.' + rev }; saveBudgetDraft(); renderPresupuesto($('#stage')); toast('Revisión ' + rev + ' lista para editar'); } },
+    { label: 'Duplicar como nuevo', icon: 'copy', run: () => { PB = { ...newBudget(), ...b.data, savedId: null, rev: 0, folio: '', fecha: todayISO(), clienteId: '', clienteNombre: '', obra: '' }; saveBudgetDraft(); renderPresupuesto($('#stage')); } },
+    '-',
+    { label: 'Eliminar', icon: 'trash', danger: true, run: async () => { if (!await confirmDialog('Eliminar presupuesto', `¿Eliminar <b>${esc(b.folio)}</b>?`)) return; Store.data.presupuestos = Store.data.presupuestos.filter(x => x.id !== id); if (PB && PB.savedId === id) PB.savedId = null; Store.save('presupuestos'); drawBudgets(); } }
   ]);
 }
 
@@ -1556,6 +2011,7 @@ const MOD_INFO = [
   { k: 'clientes', icon: 'users', d: 'Cartera, saldos y datos de contacto' },
   { k: 'actividades', icon: 'kanban', d: 'Tablero del equipo en campo' },
   { k: 'reporte', icon: 'report', d: 'Formularios y PDF de visita' },
+  { k: 'presupuesto', icon: 'cash', d: 'Presupuestos de visita técnica' },
   { k: 'proyectos', icon: 'folder', d: 'Próximamente' },
   { k: 'monitor', icon: 'pulse', d: 'Próximamente' }
 ];
@@ -1709,6 +2165,75 @@ function showLogin(msg, prefill = '') {
     }
   });
 }
+/* ================= Notificaciones (campana) ================= */
+let NOTIFS = [], notifTimer = null;
+function timeAgo(iso) {
+  const s = (Date.now() - new Date(iso)) / 1000;
+  if (s < 60) return 'Hace un momento';
+  if (s < 3600) return `Hace ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `Hace ${Math.floor(s / 3600)} h`;
+  if (s < 172800) return 'Ayer';
+  return fmtDate(iso);
+}
+async function refreshNotifs() {
+  if (!ME) return;
+  try { NOTIFS = (await Api.notif.list()).items || []; } catch (e) { return; }
+  drawBell(); drawNotifPanel();
+}
+function drawBell() {
+  const n = NOTIFS.length, c = $('#bellCount');
+  c.textContent = n > 99 ? '99+' : String(n); c.hidden = !n;
+  $('#bellBtn').setAttribute('aria-label', n ? `Notificaciones (${n})` : 'Notificaciones');
+}
+function notifOutside(e) { const p = $('#notifPanel'); if (p && !p.contains(e.target) && !$('#bellBtn').contains(e.target) && !e.target.closest('.modal-ov')) closeNotifPanel(); }
+function closeNotifPanel() { const p = $('#notifPanel'); if (p) p.remove(); document.removeEventListener('pointerdown', notifOutside, true); $('#bellBtn').classList.remove('on'); }
+function toggleNotifPanel() {
+  if ($('#notifPanel')) return closeNotifPanel();
+  if (popClose) popClose();
+  const el = document.createElement('div'); el.id = 'notifPanel'; el.className = 'notif-panel'; el.setAttribute('role', 'dialog');
+  document.body.appendChild(el); $('#bellBtn').classList.add('on');
+  el.addEventListener('click', onNotifClick);
+  drawNotifPanel(); refreshNotifs();
+  setTimeout(() => document.addEventListener('pointerdown', notifOutside, true), 0);
+}
+function drawNotifPanel() {
+  const p = $('#notifPanel'); if (!p) return;
+  p.innerHTML = `<div class="np-head"><b>Notificaciones</b><span class="badge">${NOTIFS.length}</span></div>
+    <div class="np-list">${NOTIFS.length ? NOTIFS.map(n => `
+      <div class="np-item" data-nid="${esc(n.id)}" role="button" tabindex="0">
+        <span class="np-ico">${ICON.check}</span>
+        <div class="np-txt"><b>${esc(n.title)}</b><p>${esc(n.body)}</p><small>${esc(timeAgo(n.created))}</small></div>
+        <button class="icon-btn danger np-del" data-ndel="${esc(n.id)}" aria-label="Eliminar notificación">${ICON.x}</button>
+      </div>`).join('') : `<div class="np-empty">${ICON.bell}<b>Sin notificaciones</b>Aquí verás los avisos de tu equipo.</div>`}</div>
+    ${NOTIFS.length ? `<div class="np-foot"><button class="btn sm ghost danger" data-nclear>${ICON.trash}Eliminar todas</button></div>` : ''}`;
+}
+async function onNotifClick(e) {
+  const del = e.target.closest('[data-ndel]');
+  if (del) { e.stopPropagation(); const id = del.dataset.ndel; NOTIFS = NOTIFS.filter(n => n.id !== id); drawBell(); drawNotifPanel(); Api.notif.remove(id).catch(() => {}); return; }
+  if (e.target.closest('[data-nclear]')) {
+    if (!await confirmDialog('Eliminar notificaciones', '¿Eliminar todas tus notificaciones?', 'Eliminar todas')) return;
+    NOTIFS = []; drawBell(); drawNotifPanel(); Api.notif.clear().catch(() => {}); return;
+  }
+  const it = e.target.closest('[data-nid]');
+  if (it) { const n = NOTIFS.find(x => x.id === it.dataset.nid); closeNotifPanel(); if (n && n.link && n.link.type === 'card') openCard(n.link.id); }
+}
+async function openCard(id) {
+  if (!can('actividades')) return toast('No tienes acceso a Actividades', true);
+  try { await Store.reload(); } catch (e) {}
+  go('actividades');
+  const { col, card } = findCard(id);
+  if (!card) return toast('La actividad ya no existe', true);
+  cardForm(card, col.id);
+}
+function startNotifs() {
+  $('#bellBtn').hidden = false;
+  refreshNotifs();
+  clearInterval(notifTimer);
+  notifTimer = setInterval(() => { if (document.visibilityState === 'visible') refreshNotifs(); }, 30000);
+}
+function stopNotifs() { clearInterval(notifTimer); NOTIFS = []; closeNotifPanel(); $('#bellBtn').hidden = true; drawBell(); }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && ME) refreshNotifs(); });
+
 function renderUserChip() {
   const c = $('#userChip');
   c.innerHTML = `<span class="avatar" style="background:${hashColor(ME.username)}">${esc(initials(ME.name || ME.username))}</span><span class="user-meta"><b>${esc(ME.name || ME.username)}</b><small>${esc(ROLE_LABEL[ME.role] || ME.role)}</small></span>${ICON.down.replace('width="20" height="20"', 'width="16" height="16" class="chev"')}`;
@@ -1723,6 +2248,7 @@ function userMenu(anchor) {
 }
 async function logout(msg) {
   await Api.logout();
+  stopNotifs();
   ME = null; current = null;
   modalStack.slice().forEach(c => c());
   $('#stage').innerHTML = ''; $('#crumb').textContent = '';
@@ -1734,8 +2260,9 @@ async function startApp(me) {
   catch (e) { if (e.status === 401) return; toast('No se pudo cargar la información: ' + e.message, true); return; }
   migrateData();
   renderUserChip();
+  startNotifs();
   buildBand();
-  R = null;
+  R = null; PB = null;
   const h = location.hash.slice(1);
   if (MODULES.some(m => m.k === h && !m.soon && allowed(m))) go(h); else go(null);
 }
@@ -1745,7 +2272,8 @@ async function startApp(me) {
   if (window.AGIS_LOGOS) $('#topLogo').src = AGIS_LOGOS.wordmark;
   $('#menuBtn').onclick = () => { if (!ME) return; if (current) go(null); else setBand(!$('#band').classList.contains('open')); };
   $('#brandLink').onclick = e => { e.preventDefault(); go(null); };
-  $('#userChip').onclick = e => { if (ME) userMenu(e.currentTarget); };
+  $('#userChip').onclick = e => { if (ME) { closeNotifPanel(); userMenu(e.currentTarget); } };
+  $('#bellBtn').onclick = () => { if (ME) toggleNotifPanel(); };
   window.addEventListener('hashchange', () => { if (!ME) return; const k = location.hash.slice(1); if (k !== (current || '')) go(k || null); });
   document.addEventListener('keydown', e => {
     if (e.key === '/' && ME && !current && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && !modalStack.length) { e.preventDefault(); $('#gInput')?.focus(); }
