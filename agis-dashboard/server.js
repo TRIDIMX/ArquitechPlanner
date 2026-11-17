@@ -317,10 +317,15 @@ const server = http.createServer(async (req, res) => {
     let file = path.normalize(path.join(PUBLIC, p === '/' ? 'index.html' : p));
     if (file !== PUBLIC && !file.startsWith(PUBLIC + path.sep)) return send(req, res, 403, 'Prohibido', 'text/plain');
     fs.stat(file, (err, st) => {
-      if (err || !st.isFile()) file = path.join(PUBLIC, 'index.html');
+      if (err || !st.isFile()) { file = path.join(PUBLIC, 'index.html'); try { st = fs.statSync(file); } catch (e) { return send(req, res, 404, 'No encontrado', 'text/plain'); } }
+      // Siempre revalidar: tras un deploy el navegador toma la versión nueva de inmediato (304 si no cambió)
+      const etag = '"' + st.size.toString(36) + '-' + Math.floor(st.mtimeMs).toString(36) + '"';
+      const ext = path.extname(file);
+      const cache = /^\.(png|jpg|webp|ico)$/.test(ext) && file.includes(path.sep + 'icons' + path.sep) ? 'public, max-age=86400' : 'no-cache';
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers(req, { ETag: etag, 'Cache-Control': cache })); return res.end(); }
       fs.readFile(file, (e2, buf) => {
         if (e2) return send(req, res, 404, 'No encontrado', 'text/plain');
-        res.writeHead(200, headers(req, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': file.endsWith('.html') ? 'no-cache' : 'public, max-age=300' }));
+        res.writeHead(200, headers(req, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cache, ETag: etag }));
         res.end(method === 'HEAD' ? undefined : buf);
       });
     });
