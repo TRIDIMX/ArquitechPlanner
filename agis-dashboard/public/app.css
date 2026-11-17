@@ -636,3 +636,23 @@ body.locked .topbar,body.locked .band,body.locked .stage{display:none}
 #presupuesto .sec-h{border-bottom-color:#1a1a2e}
 #presupuesto .bullet-row .tri{border-left-color:#666}
 .bullet-row textarea{field-sizing:content;min-height:44px}
+
+/* Presupuesto: costos internos y catálogos */
+.internal-box{border:1px dashed #d7c9a8;background:#fffbf3;border-radius:14px;padding:14px}
+.internal-h{display:flex;align-items:center;gap:8px;margin-bottom:10px;color:#7a5c2e}
+.internal-h svg{width:15px;height:15px}
+.internal-h b{font-size:13px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.formula{margin:10px 0 0;font-size:12px;color:var(--muted);line-height:1.5}
+.formula b{color:var(--text)}
+.ro-line.strong{font-size:15px;color:var(--navy);font-weight:800;border-style:solid}
+.part-int{display:flex;align-items:center;gap:5px;margin-top:4px;font-size:11.5px;color:#9a7a45;font-weight:600}
+.int-sum{margin-top:12px;padding:10px 12px;border:1px dashed #d7c9a8;background:#fffbf3;border-radius:12px;display:flex;flex-direction:column;gap:6px}
+.int-sum:empty{display:none}
+.int-sum .int-h{display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#9a7a45}
+.int-sum>div:not(.int-h){display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--text-2)}
+.int-sum b{font-variant-numeric:tabular-nums;color:var(--text)}
+.cat-list{display:flex;flex-direction:column;gap:8px}
+.cat-row{display:flex;gap:6px;align-items:center}
+.cat-add{display:flex;gap:8px;margin-top:4px;padding-top:12px;border-top:1px solid var(--line-2)}
+@media (max-width:760px){.grid4{grid-template-columns:1fr 1fr}}

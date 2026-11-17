@@ -208,6 +208,7 @@ const Store = {
     if (!Array.isArray(this.data.clientes)) this.data.clientes = [];
     if (!Array.isArray(this.data.reportes)) this.data.reportes = [];
     if (!Array.isArray(this.data.presupuestos)) this.data.presupuestos = [];
+    if (!this.data.catalogos) this.data.catalogos = { secciones: [...SECCIONES_DEF], unidades: [...UNIDADES_DEF] };
     if (!this.data.board) { this.data.board = seedBoard(); if (can('actividades')) this.save('board'); }
     if (!this.data.seeded && !this.data.clientes.length && can('clientes')) { this.data.clientes = seedClientes(); this.data.seeded = true; this.save('clientes'); this.save('seeded'); }
     const b = $('#syncBadge');
@@ -218,11 +219,12 @@ const Store = {
   async reload() {
     if (this.mode !== 'api') return;
     const fresh = await Api.req('GET', 'api/db');
-    ['clientes', 'board', 'reportes', 'presupuestos', 'config'].forEach(k => { if (fresh[k] !== undefined && fresh[k] !== null) this.data[k] = fresh[k]; });
+    ['clientes', 'board', 'reportes', 'presupuestos', 'config', 'catalogos'].forEach(k => { if (fresh[k] !== undefined && fresh[k] !== null) this.data[k] = fresh[k]; });
   },
   save(key) {
     const need = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto' }[key];
     if (need && !can(need)) return;
+    if (key === 'catalogos' && !isAdmin()) return;
     if (this.mode === 'api') {
       Api.req('PUT', 'api/db/' + key, this.data[key]).catch(e => { if (e.status !== 401) toast(e.status === 403 ? 'Sin permiso para guardar en este módulo' : 'No se pudo guardar en el servidor', true); });
     } else if (this.mode === 'local') {
@@ -1724,7 +1726,45 @@ const OBS_DEFAULT = [
   'Se considera la realización de los trabajos en días y horarios hábiles, lunes a viernes, 9:00am a 6:00pm, Sábados, 9:00am a 2:00pm.',
   'Se deberá revisar la propuesta de acuerdo a los requerimientos definitivos del cliente final.'
 ];
-const UNIDADES = ['LOTE', 'SERV', 'PZA', 'JGO', 'KIT', 'HR', 'M', 'M2'];
+const SECCIONES_DEF = ['Equipos', 'Accesorios', 'Cableados', 'Mano de Obra', 'Programación', 'Visita Técnica'];
+const UNIDADES_DEF = ['Pieza', 'Lote', 'Metros', 'Bobina'];
+const catList = k => (Store.data.catalogos && Array.isArray(Store.data.catalogos[k]) ? Store.data.catalogos[k] : (k === 'secciones' ? SECCIONES_DEF : UNIDADES_DEF));
+const r2 = n => Math.round((+n || 0) * 100) / 100;
+/* Precio unitario = (Costo + Mano de obra) × (1 + Indirectos %) × (1 + Margen %) */
+function calcPU(p) { return r2(((+p.costo || 0) + (+p.manoObra || 0)) * (1 + (+p.indirectos || 0) / 100) * (1 + (+p.margen || 0) / 100)); }
+/* Administración de catálogos (solo admin) */
+function catalogManager(key, title, onDone) {
+  if (!isAdmin()) return;
+  let items = [...catList(key)];
+  openModal({
+    title, size: 'narrow',
+    body: `<p class="meta-line">Solo los administradores pueden modificar esta lista. Los presupuestos ya guardados no cambian.</p>
+      <div class="cat-list" id="catList"></div>
+      <div class="cat-add"><input class="input" id="catNew" placeholder="Nuevo elemento" maxlength="40"><button type="button" class="btn" id="catAddBtn">${ICON.plus}Agregar</button></div>`,
+    foot: `<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${ICON.save}Guardar lista</button>`,
+    onMount(m, close) {
+      const list = m.querySelector('#catList');
+      const draw = () => {
+        list.innerHTML = items.map((t, i) => `<div class="cat-row"><input class="input" data-ci="${i}" value="${esc(t)}" maxlength="40"><button type="button" class="icon-btn" data-cu="${i}" title="Subir" ${i === 0 ? 'disabled style="opacity:.3"' : ''}>${ICON.up}</button><button type="button" class="icon-btn danger" data-cd="${i}" title="Eliminar">${ICON.trash}</button></div>`).join('') || '<span class="meta-line">La lista está vacía.</span>';
+      };
+      draw();
+      list.addEventListener('input', e => { const i = e.target.dataset.ci; if (i !== undefined) items[+i] = e.target.value; });
+      list.addEventListener('click', e => {
+        const d = e.target.closest('[data-cd]'); if (d) { items.splice(+d.dataset.cd, 1); draw(); return; }
+        const u = e.target.closest('[data-cu]'); if (u) { const i = +u.dataset.cu; if (i > 0) { [items[i - 1], items[i]] = [items[i], items[i - 1]]; draw(); } }
+      });
+      const add = () => { const inp = m.querySelector('#catNew'), v = inp.value.trim(); if (!v) return; if (items.some(x => x.toLowerCase() === v.toLowerCase())) return toast('Ya existe en la lista', true); items.push(v); inp.value = ''; draw(); inp.focus(); };
+      m.querySelector('#catAddBtn').onclick = add;
+      m.querySelector('#catNew').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+      m.querySelector('[data-save]').onclick = () => {
+        const clean = [...new Set(items.map(x => x.trim()).filter(Boolean))];
+        if (!clean.length) return toast('La lista no puede quedar vacía', true);
+        Store.data.catalogos = { ...(Store.data.catalogos || {}), [key]: clean };
+        Store.save('catalogos'); close(); toast('Lista actualizada'); onDone && onDone();
+      };
+    }
+  });
+}
 function newBudget() {
   return {
     folio: '', rev: 0, clienteId: '', clienteNombre: '', fecha: todayISO(), obra: '', lugar: 'Ciudad de México, CDMX',
@@ -1813,6 +1853,7 @@ function renderPresupuesto(stage) {
           <div class="tot-main"><span>Total</span><b id="tTot"></b></div>
         </div>
         <p class="tot-letras" id="tLetras"></p>
+        <div class="int-sum" id="tInt"></div>
         <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px">
           <button class="btn primary" data-act="bpdf" style="justify-content:center;height:46px">${ICON.pdf}Generar PDF</button>
           <div style="display:flex;gap:8px"><button class="btn" data-act="bsave" style="flex:1;justify-content:center">${ICON.save}Guardar</button><button class="btn" data-act="bnew" style="flex:1;justify-content:center">${ICON.reset}Nuevo</button></div>
@@ -1869,7 +1910,7 @@ function drawParts() {
     const imp = (+p.cantidad || 0) * (+p.precio || 0);
     html += `<div class="part">
       <span class="part-code mono">${esc(p.codigo || '—')}</span>
-      <span class="part-con">${esc(p.concepto)}</span>
+      <span class="part-con">${esc(p.concepto)}${p.costo !== undefined ? `<small class="part-int">${ICON.lock.replace('width="20" height="20"', 'width="11" height="11"')} Costo ${AGIS_money(p.costo)} · M.O. ${AGIS_money(p.manoObra)} · Ind. ${+p.indirectos || 0}% · Margen ${+p.margen || 0}%</small>` : ''}</span>
       <span class="part-q"><small>${esc(p.unidad || '')}</small>${AGIS_money(p.cantidad)} × ${AGIS_money(p.precio)}</span>
       <b class="part-imp">${AGIS_money(imp)}</b>
       <span class="acts"><button class="icon-btn" data-pup="${i}" title="Subir" ${i === 0 ? 'disabled style="opacity:.3"' : ''}>${ICON.up}</button><button class="icon-btn" data-pedit="${i}" title="Editar">${ICON.edit}</button><button class="icon-btn danger" data-pdel="${i}" title="Eliminar">${ICON.trash}</button></span>
@@ -1887,6 +1928,13 @@ function drawBudgetTotals() {
   const t = AGIS_budgetTotals(PB);
   $('#tSub').textContent = curFmt(t.subtotal); $('#tIva').textContent = curFmt(t.iva); $('#tTot').textContent = curFmt(t.total);
   $('#tLetras').textContent = AGIS_importeLetras(t.total, PB.moneda);
+  const costo = PB.partidas.reduce((a, p) => a + (+p.cantidad || 0) * ((+p.costo || 0) + (+p.manoObra || 0)), 0);
+  const hasInt = PB.partidas.some(p => p.costo !== undefined);
+  const util = t.subtotal - costo;
+  $('#tInt').innerHTML = hasInt ? `<div class="int-h">${ICON.lock.replace('width="20" height="20"', 'width="12" height="12"')} Interno · no se imprime</div>
+    <div><span>Costo directo (costo + M.O.)</span><b>${curFmt(costo)}</b></div>
+    <div><span>Indirectos + utilidad</span><b>${curFmt(util)}</b></div>
+    <div><span>% sobre venta</span><b>${t.subtotal ? (util / t.subtotal * 100).toFixed(1) + '%' : '—'}</b></div>` : '';
   $('#preciosTxt').textContent = `Precios en ${PB.moneda === 'USD' ? 'Dólares USD' : 'Pesos MXN'} pagaderos al día de facturación.`;
   $$('#curSeg button').forEach(b => b.classList.toggle('on', b.dataset.cur === PB.moneda));
 }
@@ -1894,32 +1942,59 @@ function partForm(i) {
   const isNew = i === undefined;
   const code = (PB.sistemaCodigo || 'SGN').toUpperCase();
   const nextCode = `${code}-P-${String(PB.partidas.filter(p => (p.codigo || '').startsWith(code + '-P-')).length + 1).padStart(3, '0')}`;
-  const p = isNew ? { codigo: nextCode, seccion: PB.partidas.length ? PB.partidas[PB.partidas.length - 1].seccion : 'VISITA TÉCNICA', concepto: '', unidad: 'LOTE', cantidad: 1, precio: '' } : { ...PB.partidas[i] };
-  const secciones = [...new Set(['VISITA TÉCNICA', 'MATERIALES', 'MANO DE OBRA', 'EQUIPOS', ...PB.partidas.map(x => (x.seccion || '').toUpperCase()).filter(Boolean)])];
+  const prev = PB.partidas[PB.partidas.length - 1] || {};
+  const p = isNew
+    ? { codigo: nextCode, seccion: prev.seccion || 'Visita Técnica', concepto: '', unidad: 'Lote', cantidad: 1, costo: '', manoObra: '', indirectos: prev.indirectos ?? '', margen: prev.margen ?? '' }
+    : { ...PB.partidas[i] };
+  if (!isNew && p.costo === undefined) { p.costo = p.precio; p.manoObra = 0; p.indirectos = 0; p.margen = 0; } // partidas anteriores: el precio pasa a costo
+  const opts = (key, cur) => { const l = catList(key); const all = cur && !l.some(x => x.toLowerCase() === String(cur).toLowerCase()) ? [...l, cur] : l; return all.map(x => `<option ${String(cur).toLowerCase() === x.toLowerCase() ? 'selected' : ''}>${esc(x)}</option>`).join(''); };
+  const gear = key => isAdmin() ? `<button type="button" class="icon-btn" data-cat="${key}" title="Editar lista (admin)" style="height:42px;width:42px;border:1px solid var(--line);flex:none">${ICON.edit}</button>` : '';
   openModal({
     title: isNew ? 'Agregar partida' : 'Editar partida', size: 'wide',
     body: `<div class="grid2">
       <div class="field"><label>Código</label><input class="input mono" name="codigo" value="${esc(p.codigo)}"></div>
-      <div class="field"><label>Sección</label><input class="input" name="seccion" list="secList" value="${esc(p.seccion)}"><datalist id="secList">${secciones.map(x => `<option value="${esc(x)}">`).join('')}</datalist></div>
+      <div class="field"><label>Sección</label><div style="display:flex;gap:6px"><select class="input" name="seccion">${opts('secciones', p.seccion)}</select>${gear('secciones')}</div></div>
       <div class="field span2"><label>Concepto <span class="req">*</span></label><textarea class="input" name="concepto" rows="3" autofocus placeholder="Descripción del trabajo o suministro">${esc(p.concepto)}</textarea></div>
-      <div class="field"><label>Unidad</label><input class="input" name="unidad" list="uniList" value="${esc(p.unidad)}"><datalist id="uniList">${UNIDADES.map(x => `<option value="${x}">`).join('')}</datalist></div>
+      <div class="field"><label>Unidad</label><div style="display:flex;gap:6px"><select class="input" name="unidad">${opts('unidades', p.unidad)}</select>${gear('unidades')}</div></div>
       <div class="field"><label>Cantidad <span class="req">*</span></label><input class="input" name="cantidad" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.cantidad)}"></div>
-      <div class="field"><label>Precio unitario (${PB.moneda}) <span class="req">*</span></label><input class="input" name="precio" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.precio)}"></div>
+      <div class="field span2 internal-box">
+        <div class="internal-h">${ICON.lock}<b>Uso interno</b><span class="meta-line">No aparece en el presupuesto impreso</span></div>
+        <div class="grid4">
+          <div class="field"><label>Costo unitario <span class="req">*</span></label><input class="input" name="costo" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.costo)}" placeholder="0.00"></div>
+          <div class="field"><label>Mano de obra (unitaria)</label><input class="input" name="manoObra" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(p.manoObra)}" placeholder="0.00"></div>
+          <div class="field"><label>Indirectos %</label><input class="input" name="indirectos" type="number" min="0" step="0.1" inputmode="decimal" value="${esc(p.indirectos)}" placeholder="0"></div>
+          <div class="field"><label>Margen %</label><input class="input" name="margen" type="number" min="0" step="0.1" inputmode="decimal" value="${esc(p.margen)}" placeholder="0"></div>
+        </div>
+        <p class="formula" id="pFormula"></p>
+      </div>
+      <div class="field"><label>Precio unitario (${PB.moneda})</label><div class="ro-line strong" id="puPrev"></div></div>
       <div class="field"><label>Importe</label><div class="ro-line" id="impPrev"></div></div>
     </div>`,
     foot: `<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${isNew ? 'Agregar' : 'Guardar'}</button>`,
     onMount(m, close) {
       const f = n => m.querySelector(`[name=${n}]`);
-      const upd = () => { m.querySelector('#impPrev').textContent = curFmt((parseFloat(f('cantidad').value) || 0) * (parseFloat(f('precio').value) || 0)); };
-      f('cantidad').oninput = upd; f('precio').oninput = upd; upd();
+      const vals = () => ({ costo: parseFloat(f('costo').value) || 0, manoObra: parseFloat(f('manoObra').value) || 0, indirectos: parseFloat(f('indirectos').value) || 0, margen: parseFloat(f('margen').value) || 0 });
+      const upd = () => {
+        const v = vals(), pu = calcPU(v), cd = v.costo + v.manoObra, conInd = r2(cd * (1 + v.indirectos / 100));
+        m.querySelector('#puPrev').textContent = curFmt(pu);
+        m.querySelector('#impPrev').textContent = curFmt((parseFloat(f('cantidad').value) || 0) * pu);
+        m.querySelector('#pFormula').innerHTML = `(${AGIS_money(v.costo)} + ${AGIS_money(v.manoObra)}) = <b>${AGIS_money(cd)}</b> · +${v.indirectos}% indirectos = <b>${AGIS_money(conInd)}</b> · +${v.margen}% margen = <b>${AGIS_money(pu)}</b>`;
+      };
+      ['cantidad', 'costo', 'manoObra', 'indirectos', 'margen'].forEach(n => f(n).addEventListener('input', upd)); upd();
+      m.addEventListener('click', e => {
+        const g = e.target.closest('[data-cat]'); if (!g) return;
+        const key = g.dataset.cat, sel = f(key === 'secciones' ? 'seccion' : 'unidad'), cur = sel.value;
+        catalogManager(key, key === 'secciones' ? 'Secciones de partidas' : 'Unidades', () => { sel.innerHTML = opts(key, catList(key).includes(cur) ? cur : catList(key)[0]); });
+      });
       m.querySelector('[data-save]').onclick = () => {
-        const con = f('concepto').value.trim(), q = parseFloat(f('cantidad').value), pu = parseFloat(f('precio').value);
+        const con = f('concepto').value.trim(), q = parseFloat(f('cantidad').value), v = vals();
         let bad = null;
         if (!con) bad = bad || f('concepto');
         if (!(q > 0)) bad = bad || f('cantidad');
-        if (!(pu >= 0) || f('precio').value === '') bad = bad || f('precio');
+        if (f('costo').value === '' || v.costo < 0) bad = bad || f('costo');
+        if (v.manoObra < 0) bad = bad || f('manoObra');
         if (bad) { bad.classList.add('invalid'); bad.focus(); return; }
-        const rec = { codigo: f('codigo').value.trim(), seccion: (f('seccion').value.trim() || 'GENERAL').toUpperCase(), concepto: con, unidad: f('unidad').value.trim().toUpperCase(), cantidad: q, precio: Math.round(pu * 100) / 100 };
+        const rec = { codigo: f('codigo').value.trim(), seccion: f('seccion').value, concepto: con, unidad: f('unidad').value, cantidad: q, ...v, precio: calcPU(v) };
         if (isNew) PB.partidas.push({ id: uid(), ...rec }); else PB.partidas[i] = { ...PB.partidas[i], ...rec };
         drawParts(); saveBudgetDraft(); close();
       };

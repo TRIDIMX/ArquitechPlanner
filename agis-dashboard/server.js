@@ -131,10 +131,11 @@ function dbFor(u) {
   if (can(u, 'presupuesto')) out.presupuestos = db.presupuestos || [];
   if (can(u, 'reporte')) out.reportes = db.reportes || [];
   else if (can(u, 'actividades')) out.reportes = (db.reportes || []).map(({ data, ...r }) => r);
+  out.catalogos = db.catalogos || null;
   out.colPrefs = (db.colPrefs || {})[u.username] || null;
   return out;
 }
-const PUT_PERM = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto', seeded: null, colPrefs: null };
+const PUT_PERM = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto', catalogos: 'admin', seeded: null, colPrefs: null };
 
 /* ---------- Validación de usuarios ---------- */
 function cleanUserInput(b, isNew) {
@@ -212,7 +213,7 @@ const server = http.createServer(async (req, res) => {
       if (m && method === 'PUT') {
         const key = m[1];
         if (!(key in PUT_PERM)) return send(req, res, 400, { error: 'Colección inválida' });
-        if (PUT_PERM[key] && !can(me, PUT_PERM[key])) return send(req, res, 403, { error: 'Sin permiso para este módulo' });
+        if (PUT_PERM[key] === 'admin' ? me.role !== 'admin' : (PUT_PERM[key] && !can(me, PUT_PERM[key]))) return send(req, res, 403, { error: 'Sin permiso para este módulo' });
         const body = await readBody(req);
         if (key === 'colPrefs') { db.colPrefs = db.colPrefs || {}; db.colPrefs[me.username] = body; }
         else db[key] = body;
