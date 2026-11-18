@@ -1,4 +1,4 @@
-# Arquitechtura AGIS · Dashboard (iteración 3)
+# Arquitechtura AGIS · Dashboard (iteración 4.1)
 
 Módulos: **Home** (banda de botones flotantes), **Clientes**, **Actividades** (tablero tipo Trello) y **Reporte Visita** (formulario → PDF con firmas).
 
@@ -49,7 +49,8 @@ Perfil *Administrador* = todos los módulos + gestión de usuarios. *Colaborador
 - `GET|POST /api/users` · `PUT|DELETE /api/users/{usuario}` (admin)
 - `GET /api/directory` (usuarios activos, para elegir a quién notificar)
 - `GET|POST|DELETE /api/notifications` · `DELETE /api/notifications/{id}`
-- `PUT /api/db/presupuestos` (módulo Presupuesto)
+- `PUT /api/db/presupuestos` (Presupuesto) · `PUT /api/db/proyectos` (Proyectos) · `PUT /api/db/catalogos` (solo admin)
+- Monitor: solo administradores
 
 Sin servidor (vista previa) la app trabaja en modo local con usuario `admin` / `admin`.
 
@@ -58,3 +59,10 @@ Sin servidor (vista previa) la app trabaja en modo local con usuario `admin` / `
 - Folio sugerido del reporte: `XXX-TIPO-###` (p. ej. `TRU-IDO-001`).
 - Arrastrar tarjetas: mouse (clic y arrastra) o touch (mantén presionado ~0.3 s y arrastra).
 - Siguientes pasos sugeridos: importación desde Trello (API), usuarios/roles, módulos Proyectos y Monitor.
+
+## Migración Clientes → Clientes + Proyectos (v4.1)
+- Al entrar a **Clientes** un administrador ve el aviso **"Revisar migración"**: vista previa, respaldo descargable y botón **Aplicar**.
+- Cliente = contacto principal, teléfono, correo. Proyecto = nombre, estatus, origen, dirección, servicios, saldo y notas.
+- Mismo contacto → un cliente con varios proyectos. Sin contacto → nombre provisional + "Por completar".
+- El servidor guarda `data/backups/pre-migracion-<fecha>.json` antes de aplicar (`POST /api/migrate`).
+- Para revertir: detener el servicio, copiar ese respaldo sobre `data/db.json` y volver a iniciar.

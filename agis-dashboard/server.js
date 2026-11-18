@@ -125,17 +125,21 @@ function sameOrigin(req) {
 
 /* ---------- Filtrado de datos por permisos ---------- */
 function dbFor(u) {
-  const out = { seeded: db.seeded };
+  const out = { seeded: db.seeded, schema: db.schema || 1 };
   out.clientes = can(u, 'clientes') ? (db.clientes || []) : (db.clientes || []).map(c => ({ id: c.id, nombre: c.nombre, estatus: c.estatus }));
   if (can(u, 'actividades')) { out.board = db.board || null; out.config = db.config || null; }
+  else if (can(u, 'proyectos')) { out.board = db.board || null; out.config = db.config || null; } // solo lectura para calcular avances
   if (can(u, 'presupuesto')) out.presupuestos = db.presupuestos || [];
+  else if (can(u, 'proyectos')) out.presupuestos = (db.presupuestos || []).map(({ data, ...r }) => r);
+  if (can(u, 'proyectos') || u.role === 'admin') out.proyectos = db.proyectos || [];
   if (can(u, 'reporte')) out.reportes = db.reportes || [];
-  else if (can(u, 'actividades')) out.reportes = (db.reportes || []).map(({ data, ...r }) => r);
+  else if (can(u, 'actividades') || can(u, 'proyectos')) out.reportes = (db.reportes || []).map(({ data, ...r }) => can(u, 'proyectos')
+    ? { ...r, data: { componentes: ((data && data.componentes) || []).map(c => ({ sistema: c.sistema, estado: c.estado, observacion: c.observacion })) } } : r);
   out.catalogos = db.catalogos || null;
   out.colPrefs = (db.colPrefs || {})[u.username] || null;
   return out;
 }
-const PUT_PERM = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto', catalogos: 'admin', seeded: null, colPrefs: null };
+const PUT_PERM = { clientes: 'clientes', board: 'actividades', config: 'actividades', reportes: 'reporte', presupuestos: 'presupuesto', proyectos: 'proyectos', catalogos: 'admin', seeded: null, colPrefs: null };
 
 /* ---------- Validación de usuarios ---------- */
 function cleanUserInput(b, isNew) {
@@ -214,11 +218,30 @@ const server = http.createServer(async (req, res) => {
         const key = m[1];
         if (!(key in PUT_PERM)) return send(req, res, 400, { error: 'Colección inválida' });
         if (PUT_PERM[key] === 'admin' ? me.role !== 'admin' : (PUT_PERM[key] && !can(me, PUT_PERM[key]))) return send(req, res, 403, { error: 'Sin permiso para este módulo' });
+        // Una pestaña con la versión anterior de los datos no puede sobrescribir datos ya migrados
+        if ((db.schema || 1) >= 2 && ['clientes', 'proyectos', 'board', 'reportes', 'presupuestos'].includes(key) && String(req.headers['x-schema'] || '1') !== String(db.schema))
+          return send(req, res, 409, { error: 'Los datos se actualizaron a una nueva estructura. Recarga la página.', reload: true });
         const body = await readBody(req);
         if (key === 'colPrefs') { db.colPrefs = db.colPrefs || {}; db.colPrefs[me.username] = body; }
         else db[key] = body;
         await persistDb();
         return send(req, res, 200, { ok: true });
+      }
+
+      /* --- Migración de estructura (solo admin): reemplaza colecciones de una sola vez con respaldo previo --- */
+      if (p === '/api/migrate' && method === 'POST') {
+        if (me.role !== 'admin') return send(req, res, 403, { error: 'Solo administradores' });
+        const b = await readBody(req);
+        if (!b || !Array.isArray(b.clientes) || !Array.isArray(b.proyectos) || !(+b.schema >= 2)) return send(req, res, 400, { error: 'Datos de migración incompletos' });
+        await qDb;
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const bk = path.join(DATA_DIR, 'backups', `pre-migracion-${stamp}.json`);
+        await fs.promises.writeFile(bk, JSON.stringify(db));
+        ['clientes', 'proyectos', 'board', 'reportes', 'presupuestos'].forEach(k => { if (b[k] !== undefined) db[k] = b[k]; });
+        db.schema = +b.schema; db.migratedAt = new Date().toISOString(); db.migratedBy = me.username;
+        await persistDb();
+        console.log(`Migración a estructura ${db.schema} por ${me.username} · respaldo: ${bk}`);
+        return send(req, res, 200, { ok: true, backup: path.basename(bk) });
       }
 
       if (p === '/api/upload' && method === 'POST') {
