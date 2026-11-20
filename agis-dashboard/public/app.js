@@ -59,6 +59,7 @@ const ICON = {
   lock: I('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
   eye: I('<path d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z"/><circle cx="12" cy="12" r="3"/>'),
   key: I('<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M15 8l2 2"/>'),
+  home: I('<path d="M4 11 12 4l8 7"/><path d="M6 9.5V19a1 1 0 0 0 1 1h3.5v-5h3v5H17a1 1 0 0 0 1-1V9.5"/>'),
   bell: I('<path d="M6 9a6 6 0 0 1 12 0c0 5 2 6.5 2 6.5H4S6 14 6 9z"/><path d="M10 19a2 2 0 0 0 4 0"/>'),
   cash: I('<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 9.5v5M18 9.5v5"/>'),
   check: I('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
@@ -375,31 +376,48 @@ const MODULES = [
 ];
 const allowed = m => m.adminOnly ? isAdmin() : can(m.k);
 let current = null;
-function buildBand() {
-  $('#bandInner').innerHTML = MODULES.filter(allowed).map((m, i) => `
-    <button class="fbtn ${m.hue} ${m.soon ? 'soon' : ''}" data-mod="${m.k}" style="--i:${i}" ${m.soon ? 'aria-disabled="true"' : ''}>
-      <span class="ico">${ICON[m.icon]}</span>
-      <span>${esc(m.t)}<small>${esc(m.s)}</small></span>
-    </button>`).join('');
-  if (window._bandBound) return; window._bandBound = true;
-  $('#bandInner').addEventListener('click', e => {
-    const b = e.target.closest('.fbtn'); if (!b) return;
-    const m = MODULES.find(x => x.k === b.dataset.mod);
-    if (m.soon) { toast(`${m.t}: disponible en una siguiente iteración`); return; }
-    if (m.k === 'proyectos') PS.view = 'list';
-    go(m.k);
+/* ---------- Barra lateral ---------- */
+const NAV_GROUPS = [
+  { t: null, items: ['__home'] },
+  { t: 'Operación', items: ['clientes', 'proyectos', 'actividades'] },
+  { t: 'Documentos', items: ['reporte', 'presupuesto'] },
+  { t: 'Administración', items: ['monitor', 'usuarios'] }
+];
+const isMobile = () => matchMedia('(max-width: 760px)').matches;
+function buildBand() { // nombre conservado: construye la barra lateral
+  const item = k => {
+    if (k === '__home') return `<button class="sb-item" data-mod="__home" data-tip="Inicio"><span class="sb-ico">${ICON.home}</span><span class="sb-lbl">Inicio</span></button>`;
+    const m = MODULES.find(x => x.k === k);
+    return m && allowed(m) ? `<button class="sb-item" data-mod="${m.k}" data-tip="${esc(m.t)}"><span class="sb-ico">${ICON[m.icon]}</span><span class="sb-lbl">${esc(m.t)}</span></button>` : '';
+  };
+  $('#sbNav').innerHTML = NAV_GROUPS.map(g => {
+    const html = g.items.map(item).join('');
+    return html ? `<div class="sb-group">${g.t ? `<div class="sb-gt"><span>${esc(g.t)}</span></div>` : ''}${html}</div>` : '';
+  }).join('');
+  markActive();
+  if (window._sbBound) return; window._sbBound = true;
+  $('#sbNav').addEventListener('click', e => {
+    const b = e.target.closest('.sb-item'); if (!b) return;
+    const k = b.dataset.mod;
+    if (k === 'proyectos') PS.view = 'list';
+    closeDrawer();
+    go(k === '__home' ? null : k);
   });
+  $('#sbToggle').onclick = () => { if (isMobile()) closeDrawer(); else setCollapsed(!document.body.classList.contains('sb-collapsed')); };
+  $('#sbScrim').onclick = closeDrawer;
+  $('#sbLogo').onclick = e => { e.preventDefault(); closeDrawer(); go(null); };
 }
-function setBand(open) {
-  $('#band').classList.toggle('open', open);
-  $('#band').setAttribute('aria-hidden', String(!open));
-  $('#menuBtn').setAttribute('aria-expanded', String(open));
+function markActive() { $$('.sb-item[data-mod]').forEach(b => b.classList.toggle('active', b.dataset.mod === (current || '__home'))); }
+function setCollapsed(v) {
+  document.body.classList.toggle('sb-collapsed', v);
+  const t = $('#sbToggle'); t.setAttribute('aria-label', v ? 'Expandir menú' : 'Contraer menú'); t.querySelector('.sb-lbl').textContent = v ? 'Expandir menú' : 'Contraer menú';
+  try { localStorage.setItem('agis-sb-collapsed', v ? '1' : '0'); } catch (e) {}
 }
-function setMenuMode() {
-  const b = $('#menuBtn');
-  b.classList.toggle('is-close', !!current);
-  b.setAttribute('aria-label', current ? 'Cerrar sección' : 'Abrir menú');
-}
+function openDrawer() { document.body.classList.add('sb-open'); }
+function closeDrawer() { document.body.classList.remove('sb-open'); }
+function toggleSidebar() { if (isMobile()) document.body.classList.toggle('sb-open'); else setCollapsed(!document.body.classList.contains('sb-collapsed')); }
+function setBand() {}      // compatibilidad: la cinta superior se reemplazó por la barra lateral
+function setMenuMode() {}
 function go(k, opts = {}) {
   if (!ME) return;
   let m = MODULES.find(x => x.k === k && !x.soon);
@@ -410,17 +428,15 @@ function go(k, opts = {}) {
   if (m && m.k === 'proyectos' && current !== 'proyectos' && !opts.keepView) { /* conserva la vista */ }
   if (popClose) popClose();
   if (!m) {
-    current = null; setBand(false); setMenuMode();
-    $('#crumb').textContent = ''; $$('.fbtn').forEach(b => b.classList.remove('active'));
+    current = null; markActive();
+    $('#crumb').textContent = '';
     renderLanding($('#stage'));
     if (location.hash) { try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {} }
     return;
   }
-  current = k; setMenuMode();
-  $$('.fbtn').forEach(b => b.classList.toggle('active', b.dataset.mod === k));
+  current = k; markActive();
   $('#crumb').textContent = m.t;
   m.render($('#stage'));
-  if (!opts.keepBand) setBand(false);
   if (location.hash.slice(1) !== k) { try { history.replaceState(null, '', '#' + k); } catch (e) { location.hash = k; } }
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -3152,8 +3168,10 @@ async function startApp(me) {
 
 /* ================= Arranque ================= */
 (async function boot() {
-  if (window.AGIS_LOGOS) $('#topLogo').src = AGIS_LOGOS.wordmark;
-  $('#menuBtn').onclick = () => { if (!ME) return; if (current) go(null); else setBand(!$('#band').classList.contains('open')); };
+  if (window.AGIS_LOGOS) { $('#topLogo').src = AGIS_LOGOS.wordmark; $('#sbLogoFull').src = AGIS_LOGOS.wordmark; $('#sbLogoMark').src = AGIS_LOGOS.mark; }
+  try { if (localStorage.getItem('agis-sb-collapsed') === '1') document.body.classList.add('sb-collapsed'); } catch (e) {}
+  $('#menuBtn').onclick = () => { if (ME) toggleSidebar(); };
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('sb-open')) closeDrawer(); });
   $('#brandLink').onclick = e => { e.preventDefault(); go(null); };
   $('#userChip').onclick = e => { if (ME) { closeNotifPanel(); userMenu(e.currentTarget); } };
   $('#bellBtn').onclick = () => { if (ME) toggleNotifPanel(); };

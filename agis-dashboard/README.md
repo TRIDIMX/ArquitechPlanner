@@ -1,4 +1,4 @@
-# Arquitechtura AGIS · Dashboard (iteración 4.1)
+# Arquitechtura AGIS · Dashboard (iteración 4.2)
 
 Módulos: **Home** (banda de botones flotantes), **Clientes**, **Actividades** (tablero tipo Trello) y **Reporte Visita** (formulario → PDF con firmas).
 
