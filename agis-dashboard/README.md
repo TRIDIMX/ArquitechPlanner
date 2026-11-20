@@ -1,4 +1,4 @@
-# Arquitechtura AGIS · Dashboard (iteración 4.2)
+# Arquitechtura AGIS · Dashboard (iteración 4.3)
 
 Módulos: **Home** (banda de botones flotantes), **Clientes**, **Actividades** (tablero tipo Trello) y **Reporte Visita** (formulario → PDF con firmas).
 
@@ -66,3 +66,10 @@ Sin servidor (vista previa) la app trabaja en modo local con usuario `admin` / `
 - Mismo contacto → un cliente con varios proyectos. Sin contacto → nombre provisional + "Por completar".
 - El servidor guarda `data/backups/pre-migracion-<fecha>.json` antes de aplicar (`POST /api/migrate`).
 - Para revertir: detener el servicio, copiar ese respaldo sobre `data/db.json` y volver a iniciar.
+
+## Cambios v4.3
+- **Saldo automático**: saldo de proyecto = suma de sus presupuestos vinculados; saldo de cliente = suma de sus proyectos (MXN y USD por separado). Clic en el saldo → desglose por proyecto.
+- **Clientes**: clic en los proyectos de la tabla → lista para ir directo a cada uno.
+- **Servicios contratados → Sistemas**: se migran solos al abrir la app (sin duplicados). Al agregar sistema se usa la lista; el admin la edita (agregar/editar/borrar).
+- **Actividades**: responsables = usuarios del sistema (fijos) + otros sin usuario (editables). Al asignar a un usuario le llega notificación con liga a la actividad.
+- **Presupuesto**: al entrar siempre abre uno nuevo en blanco; si sales con cambios sin guardar pide Guardar / Descartar / Cancelar.

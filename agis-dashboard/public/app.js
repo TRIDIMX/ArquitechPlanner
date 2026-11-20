@@ -420,6 +420,8 @@ function setBand() {}      // compatibilidad: la cinta superior se reemplazó po
 function setMenuMode() {}
 function go(k, opts = {}) {
   if (!ME) return;
+  if (current === 'presupuesto' && k !== 'presupuesto' && !opts.force && budgetDirty()) return guardBudget(() => go(k, { ...opts, force: true }));
+  if (k === 'presupuesto' && current !== 'presupuesto' && !opts.keepBudget) { PB = newBudget(); snapBudget(); }
   let m = MODULES.find(x => x.k === k && !x.soon);
   if (m && !allowed(m)) { toast('No tienes acceso a ese módulo', true); m = null; }
   if (!m || m.k !== 'monitor') { document.body.classList.remove('tv'); clearInterval(monTimer); }
@@ -444,6 +446,14 @@ function go(k, opts = {}) {
 /* ================= LANDING · Búsqueda global ================= */
 function migrateData() {
   let changed = false;
+  let pchanged = false;
+  (Store.data.proyectos || []).forEach(p => {
+    if (!Array.isArray(p.servicios)) return;
+    p.sistemas = p.sistemas || [];
+    p.servicios.forEach(sv => { if (!p.sistemas.some(x => normKey(x.nombre) === normKey(sv))) p.sistemas.push({ id: uid(), nombre: sv, avanceManual: null }); });
+    delete p.servicios; pchanged = true;
+  });
+  if (pchanged && can('proyectos')) Store.save('proyectos');
   Store.data.board.columns.forEach(c => {
     if (c.color && c.color[0] === '#') { c.color = pal(c.color).k; changed = true; }
     c.cards.forEach(k => { if (!Array.isArray(k.reportIds)) { k.reportIds = k.reporteId ? [k.reporteId] : []; delete k.reporteId; } });
@@ -460,7 +470,7 @@ function searchIndex(q) {
     if (isSchema2()) {
       const ps = projectsOf(c.id), sal = saldoOf(c.id);
       if (hit([c.nombre, c.id, c.email, c.telefono, ps.map(p => p.nombre).join(' ')].join(' ')))
-        out.push({ type: 'cliente', id: c.id, title: c.nombre, sub: `${c.id} · ${ps.length} proyecto${ps.length === 1 ? '' : 's'}${sal > 0 ? ' · Saldo ' + MXN.format(sal) : ''}${c.porCompletar ? ' · Por completar' : ''}` });
+        out.push({ type: 'cliente', id: c.id, title: c.nombre, sub: `${c.id} · ${ps.length} proyecto${ps.length === 1 ? '' : 's'}${sal > 0 ? ' · Saldo ' + fmtSaldo(clientSaldo(c.id)) : ''}${c.porCompletar ? ' · Por completar' : ''}` });
     } else if (hit([c.nombre, c.id, c.contacto, c.origen, c.email, c.telefono, c.direccion, (c.servicios || []).join(' ')].join(' ')))
       out.push({ type: 'cliente', id: c.id, title: c.nombre, sub: `${c.id} · ${ESTATUS.find(s => s.k === c.estatus)?.l || ''}${+c.saldo > 0 ? ' · Saldo ' + MXN.format(c.saldo) : ''}` });
   });
@@ -470,7 +480,7 @@ function searchIndex(q) {
       out.push({ type: 'actividad', id: k.id, title: k.title, sub: [col.name, k.tipo, cn, k.fecha ? fmtDate(k.fecha) : ''].filter(Boolean).join(' · ') });
   }));
   if (can('proyectos')) Store.data.proyectos.forEach(p => {
-    if (hit([p.nombre, p.codigo, p.clienteNombre, p.obra, p.direccion, p.origen, (p.servicios || []).join(' ')].join(' ')))
+    if (hit([p.nombre, p.codigo, p.clienteNombre, p.obra, p.direccion, p.origen, (p.sistemas || []).map(x => x.nombre).join(' ')].join(' ')))
       out.push({ type: 'proyecto', id: p.id, title: p.nombre, sub: `${p.codigo} · ${p.clienteNombre || ''} · ${projProgress(p).value}% · ${(PEST.find(x => x.k === p.estatus) || {}).l || ''}` });
   });
   if (can('presupuesto')) Store.data.presupuestos.forEach(b => {
@@ -535,6 +545,7 @@ function renderLanding(stage) {
 }
 function openResult(it) {
   if (!it) return;
+  if (current === 'presupuesto' && budgetDirty() && it.type !== 'presupuesto') return guardBudget(() => openResult(it));
   if (it.type === 'cliente') { go('clientes'); const c = Store.data.clientes.find(x => x.id === it.id); if (c) (isSchema2() ? clientForm2 : clientForm)(c); }
   else if (it.type === 'actividad') { go('actividades'); const { col, card } = findCard(it.id); if (card) cardForm(card, col.id); }
   else if (it.type === 'reporte') openReport(it.id);
@@ -545,7 +556,43 @@ function openResult(it) {
 /* ================= ESTRUCTURA v2: Clientes (personas) + Proyectos ================= */
 const isSchema2 = () => ((Store.data && Store.data.schema) || 1) >= 2;
 const projectsOf = cid => Store.data.proyectos.filter(p => p.clienteId === cid);
-const saldoOf = cid => projectsOf(cid).reduce((a, p) => a + (+p.saldo || 0), 0);
+/* Saldo pendiente = suma de los presupuestos vinculados a los proyectos (separado por moneda) */
+function projSaldo(p) { const t = { MXN: 0, USD: 0, n: 0 }; projBudgets(p).forEach(b => { t[b.moneda === 'USD' ? 'USD' : 'MXN'] += +b.total || 0; t.n++; }); return t; }
+function clientSaldo(cid) { const t = { MXN: 0, USD: 0, n: 0 }; projectsOf(cid).forEach(p => { const x = projSaldo(p); t.MXN += x.MXN; t.USD += x.USD; t.n += x.n; }); return t; }
+const fmtSaldo = t => (t.USD && !t.MXN ? `US$${AGIS_money(t.USD)}` : MXN.format(t.MXN) + (t.USD ? ` + US$${AGIS_money(t.USD)}` : ''));
+const saldoOf = cid => { const t = clientSaldo(cid); return t.MXN + t.USD; };
+/* Panel flotante genérico (listas al hacer clic) */
+function popPanel(anchor, html, onClick) {
+  if (popClose) popClose();
+  const m = document.createElement('div'); m.className = 'popmenu pop-panel'; m.innerHTML = html;
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  let left = Math.max(8, Math.min(r.left, innerWidth - m.offsetWidth - 8));
+  let top = r.bottom + 6; if (top + m.offsetHeight > innerHeight - 8) top = Math.max(8, r.top - m.offsetHeight - 6);
+  m.style.left = left + 'px'; m.style.top = top + 'px';
+  const out = e => { if (!m.contains(e.target)) close(); };
+  function close() { m.remove(); document.removeEventListener('pointerdown', out, true); popClose = null; }
+  m.addEventListener('click', e => { e.stopPropagation(); onClick && onClick(e, close); });
+  setTimeout(() => document.addEventListener('pointerdown', out, true), 0);
+  popClose = close;
+}
+function projectsPopover(anchor, cid) {
+  const ps = projectsOf(cid), c = Store.data.clientes.find(x => x.id === cid);
+  popPanel(anchor, `<div class="pm-head"><b>Proyectos de ${esc(c ? c.nombre : '')}</b><small>${ps.length} proyecto${ps.length === 1 ? '' : 's'}</small></div>
+    ${ps.map(p => `<button class="pp-item" data-gop="${p.id}"><i style="background:${pestOf(p.estatus).c}"></i><span><b>${esc(p.nombre)}</b><small>${esc(p.codigo)} · ${esc(pestOf(p.estatus).l)} · ${projProgress(p).value}%</small></span>${ICON.right}</button>`).join('') || '<p class="meta-line" style="padding:8px 10px;margin:0">Sin proyectos.</p>'}
+    ${can('proyectos') && c ? `<hr><button class="pp-item pp-new" data-newp="${esc(cid)}">${ICON.plus}<span><b>Nuevo proyecto para este cliente</b></span></button>` : ''}`,
+    (e, close) => {
+      const g = e.target.closest('[data-gop]'); if (g) { close(); if (can('proyectos')) openProject(g.dataset.gop); else toast('No tienes acceso a Proyectos', true); return; }
+      const n = e.target.closest('[data-newp]'); if (n) { close(); newProjectFor(c); }
+    });
+}
+function saldoPopover(anchor, cid) {
+  const ps = projectsOf(cid), t = clientSaldo(cid);
+  popPanel(anchor, `<div class="pm-head"><b>Desglose de saldo</b><small>Suma de presupuestos vinculados · Cobranza llegará en una próxima versión</small></div>
+    ${ps.map(p => { const x = projSaldo(p); return `<button class="pp-item" data-gop="${p.id}"><span><b>${esc(p.nombre)}</b><small>${x.n} presupuesto${x.n === 1 ? '' : 's'}</small></span><b class="pp-amt ${x.MXN || x.USD ? '' : 'zero'}">${fmtSaldo(x)}</b></button>`; }).join('') || '<p class="meta-line" style="padding:8px 10px;margin:0">Sin proyectos.</p>'}
+    <hr><div class="pp-total"><span>Total</span><b>${fmtSaldo(t)}</b></div>`,
+    (e, close) => { const g = e.target.closest('[data-gop]'); if (g) { close(); if (can('proyectos')) openProject(g.dataset.gop); } });
+}
 const normKey = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9ñ ]/g, ' ').replace(/\s+/g, ' ').trim();
 const EST_MAP = { prospecto: 'prospecto', curso: 'en_curso', adicionales: 'adicionales', cerrado: 'cerrado' };
 
@@ -676,8 +723,8 @@ const CLIENT2_COLS = [
   { k: 'id', l: 'ID', sort: true, w: 110, render: c => `<span class="mono">${esc(c.id)}</span>` },
   { k: 'telefono', l: 'Teléfono', def: true, w: 130, render: c => esc(c.telefono || '—') },
   { k: 'email', l: 'Correo', sort: true, def: true, w: 190, render: c => esc(c.email || '—') },
-  { k: 'proyectos', l: 'Proyectos', def: true, w: 280, cls: () => 'svc', render: c => projChips(c.id) },
-  { k: 'saldo', l: 'Saldo pendiente', sort: true, def: true, right: true, w: 140, cls: c => 'money ' + (saldoOf(c.id) > 0 ? '' : 'zero'), render: c => MXN.format(saldoOf(c.id)) },
+  { k: 'proyectos', l: 'Proyectos', def: true, w: 280, cls: () => 'svc', render: c => `<button class="cell-btn" data-projs="${esc(c.id)}" title="Ver proyectos">${projChips(c.id)}</button>` },
+  { k: 'saldo', l: 'Saldo pendiente', sort: true, def: true, right: true, w: 150, cls: c => 'money ' + (saldoOf(c.id) > 0 ? '' : 'zero'), render: c => `<button class="cell-btn saldo-btn" data-saldo="${esc(c.id)}" title="Ver desglose por proyecto">${fmtSaldo(clientSaldo(c.id))}</button>` },
   { k: 'creado', l: 'Creado el', sort: true, w: 120, render: c => fmtDate(c.creado) },
   { k: 'modificado', l: 'Última modificación', sort: true, def: true, w: 150, render: c => fmtDate(c.modificado) },
   { k: 'notas', l: 'Notas', w: 220, render: c => `<span class="clip">${esc(c.notas || '—')}</span>` }
@@ -702,7 +749,7 @@ function clientFiltered2(ignoreTab) {
     const ps = projectsOf(c.id);
     if (q && !normKey([c.nombre, c.id, c.telefono, c.email, c.notas, ps.map(p => p.nombre + ' ' + p.codigo).join(' ')].join(' ')).includes(q)) return false;
     if (CS2.origen && !ps.some(p => p.origen === CS2.origen)) return false;
-    if (CS2.servicio && !ps.some(p => (p.servicios || []).includes(CS2.servicio))) return false;
+    if (CS2.servicio && !ps.some(p => (p.sistemas || []).some(x => normKey(x.nombre) === normKey(CS2.servicio)))) return false;
     if (CS2.saldo && !(saldoOf(c.id) > 0)) return false;
     const cd = c.creado ? localISO(new Date(c.creado)) : '';
     if (CS2.from && cd < CS2.from) return false;
@@ -731,7 +778,7 @@ function renderClientes2(stage) {
         <div class="dropdown hidden" id="c2Filters"><h4>Filtrar</h4><div style="display:flex;flex-direction:column;gap:12px">
           <div class="grid2"><div class="field"><label>Creado desde</label><input type="date" class="input" id="c2From" value="${esc(CS2.from)}"></div><div class="field"><label>Hasta</label><input type="date" class="input" id="c2To" value="${esc(CS2.to)}"></div></div>
           <div class="field"><label>Origen (de sus proyectos)</label><select class="input" id="c2Origen"><option value="">Todos</option>${ORIGENES.map(o => `<option ${CS2.origen === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>
-          <div class="field"><label>Servicio contratado</label><select class="input" id="c2Serv"><option value="">Todos</option>${SERVICIOS.map(o => `<option ${CS2.servicio === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>
+          <div class="field"><label>Sistema (de sus proyectos)</label><select class="input" id="c2Serv"><option value="">Todos</option>${catList('sistemas').map(o => `<option ${CS2.servicio === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>
           <label style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px"><input type="checkbox" id="c2Saldo" ${CS2.saldo ? 'checked' : ''} style="width:17px;height:17px;accent-color:var(--navy)"> Solo con saldo pendiente</label>
           <button class="btn sm ghost" data-act="fclear" style="align-self:flex-start">Limpiar filtros</button>
         </div></div></div>
@@ -762,6 +809,8 @@ function renderClientes2(stage) {
       $('#' + id).classList.toggle('hidden'); return;
     }
     if (a === 'fclear') { Object.assign(CS2, { origen: '', servicio: '', saldo: false, from: '', to: '' }); renderClientes2($('#stage')); return; }
+    const pj = e.target.closest('[data-projs]'); if (pj) { e.stopPropagation(); return projectsPopover(pj, pj.dataset.projs); }
+    const sd = e.target.closest('[data-saldo]'); if (sd) { e.stopPropagation(); return saldoPopover(sd, sd.dataset.saldo); }
     if (a === 'bulk-del') return bulkDelete2();
     if (a === 'bulk-clear') { CS2.sel.clear(); refreshClientes2(); return; }
     if (a === 'clear-demo') return clearDemo();
@@ -825,7 +874,7 @@ function clientForm2(c) {
         <div class="field"><label>Teléfono</label><input class="input" name="telefono" type="tel" value="${esc(c.telefono)}"></div>
         <div class="field"><label>Correo</label><input class="input" name="email" type="email" value="${esc(c.email)}"></div>
         <div class="field span2"><label>Notas</label><textarea class="input" name="notas" rows="3">${esc(c.notas)}</textarea></div>
-        ${!isNew ? `<div class="field span2"><label>Proyectos (${ps.length})</label><div class="plinks">${ps.map(p => `<div class="plink" data-openp="${p.id}">${ICON.folder}<span><b>${esc(p.nombre)}</b><small>${esc(p.codigo)} · ${esc(pestOf(p.estatus).l)}${+p.saldo ? ' · Saldo ' + MXN.format(p.saldo) : ''}</small></span></div>`).join('') || '<span class="meta-line">Sin proyectos.</span>'}</div>
+        ${!isNew ? `<div class="field span2"><label>Proyectos (${ps.length})</label><div class="plinks">${ps.map(p => `<div class="plink" data-openp="${p.id}">${ICON.folder}<span><b>${esc(p.nombre)}</b><small>${esc(p.codigo)} · ${esc(pestOf(p.estatus).l)}${projSaldo(p).n ? ' · Saldo ' + fmtSaldo(projSaldo(p)) : ''}</small></span>${ICON.right}</div>`).join('') || '<span class="meta-line">Sin proyectos.</span>'}</div>
           ${can('proyectos') ? `<button type="button" class="btn sm" data-newp style="align-self:flex-start;margin-top:6px">${ICON.plus}Nuevo proyecto para este cliente</button>` : ''}</div>` : ''}
       </div>`,
     foot: `${!isNew ? `<button class="btn danger left" data-del>${ICON.trash}Eliminar</button>` : ''}<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${ICON.save}Guardar</button>`,
@@ -1245,7 +1294,7 @@ function renderActividades(stage) {
     </div>
     <div class="toolbar">
       <div class="search">${ICON.search}<input class="input" id="aSearch" placeholder="Buscar actividad o cliente…" value="${esc(AS.q)}"></div>
-      <select class="input" id="aResp" style="width:auto;min-width:160px"><option value="">Todo el equipo</option>${Store.data.config.equipo.map(p => `<option ${AS.resp === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
+      <select class="input" id="aResp" style="width:auto;min-width:160px"><option value="">Todo el equipo</option>${teamNames().map(p => `<option ${AS.resp === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select>
       <select class="input" id="aTipo" style="width:auto;min-width:170px"><option value="">Todos los tipos</option>${TIPOS.map(t => `<option ${AS.tipo === t.k ? 'selected' : ''}>${esc(t.k)}</option>`).join('')}</select>
     </div>
     <div class="board" id="board"></div>
@@ -1457,7 +1506,17 @@ function cardForm(k, colId, preset = {}) {
   let color = k.color || 'none';
   const cols = Store.data.board.columns;
   const clientes = [...Store.data.clientes].sort((a, b) => a.nombre.localeCompare(b.nombre));
-  const peopleChips = () => Store.data.config.equipo.map(p => `<span class="pchip ${resp.has(p) ? 'on' : ''}"><button type="button" class="pn" data-p="${esc(p)}">${esc(p)}</button><button type="button" class="pm" data-pmenu="${esc(p)}" aria-label="Opciones de ${esc(p)}">${ICON.vdots}</button></span>`).join('') + `<button type="button" class="tchip" data-addp>+ Agregar</button>`;
+  const respU = new Set(k.responsablesU || []);
+  const origU = new Set(k.responsablesU || []);
+  const syncLegacyU = () => DIR_CACHE.forEach(u => { if (resp.has(u.name) && !respU.has(u.username)) { respU.add(u.username); if (k.id && !k.responsablesU) origU.add(u.username); } });
+  syncLegacyU();
+  const customNames = () => Store.data.config.equipo.filter(n => !DIR_CACHE.some(u => normKey(u.name) === normKey(n)));
+  const peopleChips = () => `
+    <div class="pgroup"><span class="pgroup-l">${ICON.lock.replace('width="20" height="20"', 'width="12" height="12"')} Usuarios del sistema</span>
+      ${DIR_CACHE.length ? DIR_CACHE.map(u => `<span class="pchip user ${respU.has(u.username) ? 'on' : ''}"><button type="button" class="pn" data-u="${esc(u.username)}" title="@${esc(u.username)} · recibe aviso en la campana">${esc(u.name || u.username)}</button></span>`).join('') : '<span class="meta-line">Cargando…</span>'}</div>
+    <div class="pgroup"><span class="pgroup-l">Otros responsables (sin usuario)</span>
+      ${customNames().map(p => `<span class="pchip ${resp.has(p) ? 'on' : ''}"><button type="button" class="pn" data-p="${esc(p)}">${esc(p)}</button><button type="button" class="pm" data-pmenu="${esc(p)}" aria-label="Opciones de ${esc(p)}">${ICON.vdots}</button></span>`).join('')}
+      <button type="button" class="tchip" data-addp>+ Agregar</button></div>`;
   const repLinksHTML = () => {
     const linked = k.reportIds.map(id => Store.data.reportes.find(r => r.id === id)).filter(Boolean);
     const avail = Store.data.reportes.filter(r => !k.reportIds.includes(r.id));
@@ -1536,14 +1595,22 @@ function cardForm(k, colId, preset = {}) {
         }
         if (e.target.closest('[data-addp]')) {
           const n = await promptDialog('Agregar integrante', 'Nombre');
+            if (n && DIR_CACHE.some(u => normKey(u.name) === normKey(n))) { toast(`${n} ya es usuario del sistema; selecciónalo arriba`, true); return; }
           if (n && !Store.data.config.equipo.includes(n)) { Store.data.config.equipo.push(n); Store.save('config'); }
           if (n) resp.add(n);
           redrawPeople(); return;
+        }
+        const bu = e.target.closest('[data-u]');
+        if (bu) {
+          const u = DIR_CACHE.find(x => x.username === bu.dataset.u); if (!u) return;
+          if (respU.has(u.username)) { respU.delete(u.username); resp.delete(u.name); } else { respU.add(u.username); resp.add(u.name); }
+          bu.parentElement.classList.toggle('on', respU.has(u.username)); return;
         }
         const b = e.target.closest('[data-p]'); if (!b) return;
         resp.has(b.dataset.p) ? resp.delete(b.dataset.p) : resp.add(b.dataset.p);
         b.parentElement.classList.toggle('on', resp.has(b.dataset.p));
       };
+      loadDirectory().then(() => { syncLegacyU(); if (document.body.contains(m)) redrawPeople(); });
       async function editPerson(name) {
         const n = await promptDialog('Editar integrante', 'Nombre', name);
         if (!n || n === name) return;
@@ -1595,7 +1662,7 @@ function cardForm(k, colId, preset = {}) {
         const title = f('title').value.trim();
         if (!title) { f('title').classList.add('invalid'); f('title').focus(); toast('Escribe un título para la actividad', true); return false; }
         if (notify && !notifyUsers.size) { toast('Elige al menos un usuario a notificar o marca “No”', true); m.querySelector('#notifWrap').scrollIntoView({ block: 'center', behavior: 'smooth' }); return false; }
-        const rec = { title, tipo: f('tipo').value, clienteId: f('clienteId').value, clienteTxt: f('clienteId').value ? '' : f('clienteTxt').value.trim(), fecha: f('fecha').value, hora: f('hora').value, responsables: [...resp], direccion: f('direccion').value.trim(), notas: f('notas').value.trim(), color, reportIds: [...k.reportIds], proyectoId: f('proyectoId').value, sistemaId: f('proyectoId').value ? f('sistemaId').value : '', moveTo: f('moveTo').value, notify, notifyUsers: notify ? [...notifyUsers] : [], updated: new Date().toISOString() };
+        const rec = { title, tipo: f('tipo').value, clienteId: f('clienteId').value, clienteTxt: f('clienteId').value ? '' : f('clienteTxt').value.trim(), fecha: f('fecha').value, hora: f('hora').value, responsables: [...resp], responsablesU: [...respU], direccion: f('direccion').value.trim(), notas: f('notas').value.trim(), color, reportIds: [...k.reportIds], proyectoId: f('proyectoId').value, sistemaId: f('proyectoId').value ? f('sistemaId').value : '', moveTo: f('moveTo').value, notify, notifyUsers: notify ? [...notifyUsers] : [], updated: new Date().toISOString() };
         const wantDone = f('done').checked;
         const toCol = cols.find(c => c.id === f('col').value);
         if (!cardId) { cardId = uid(); toCol.cards.push({ id: cardId, created: new Date().toISOString(), ...rec }); if (!silent) toast('Actividad creada'); }
@@ -1604,6 +1671,13 @@ function cardForm(k, colId, preset = {}) {
           const merged = { ...col.cards[idx], ...rec, demo: false };
           if (col.id === toCol.id) col.cards[idx] = merged; else { col.cards.splice(idx, 1); toCol.cards.push(merged); }
           if (!silent) toast('Actividad actualizada');
+        }
+        // Aviso a los usuarios del sistema recién asignados como responsables
+        const nuevos = [...respU].filter(u => !origU.has(u) && u !== ME.username);
+        if (nuevos.length) {
+          Api.notif.send({ to: nuevos, title: `Actividad asignada - ${title}`, body: `${ME.name || ME.username} te asignó la actividad ${title}, da clic aquí para más detalles`, link: { type: 'card', id: cardId } })
+            .then(r => toast(`Se avisó a ${r.sent} responsable${r.sent === 1 ? '' : 's'}`)).catch(() => toast('No se pudo avisar a los responsables', true));
+          nuevos.forEach(u => origU.add(u));
         }
         if (wantDone !== !!(findCard(cardId).card || {}).done) setCardDone(cardId, wantDone);
         else { Store.save('board'); drawBoard(); }
@@ -1636,9 +1710,10 @@ function setCardDone(id, done, opts = {}) {
   } else if (!done && was) { delete card.doneAt; delete card.doneBy; toast('Actividad desmarcada'); }
   Store.save('board'); drawBoard();
 }
+const teamNames = () => [...new Set([...DIR_CACHE.map(u => u.name), ...Store.data.config.equipo])].filter(Boolean).sort((a, b) => a.localeCompare(b));
 function refreshRespFilter() {
   const s = $('#aResp'); if (!s) return;
-  s.innerHTML = `<option value="">Todo el equipo</option>${Store.data.config.equipo.map(p => `<option ${AS.resp === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}`;
+  s.innerHTML = `<option value="">Todo el equipo</option>${teamNames().map(p => `<option ${AS.resp === p ? 'selected' : ''}>${esc(p)}</option>`).join('')}`;
 }
 
 /* ================= REPORTE DE VISITA ================= */
@@ -2222,7 +2297,7 @@ function drawProjects() {
       <h3>${esc(p.nombre)}</h3>
       <p class="pc-sub">${esc(p.codigo)} · ${esc(p.clienteNombre || 'Sin cliente')}</p>
       <div class="pc-prog"><div class="pc-prog-h"><span>Avance${pr.manual ? ' <em>manual</em>' : ''}</span><b>${pr.value}%</b></div>${bar(pr.value, st.c)}<small>${pr.done}/${pr.total} actividades</small></div>
-      <div class="pc-dates"><span>${ICON.cal}${p.fechaInicio ? fmtShort(p.fechaInicio) : '—'} → ${p.fechaFin ? fmtShort(p.fechaFin) : '—'}</span>${dev ? `<span class="dev ${dev > 0 ? 'late' : ''}" title="Contra la fecha original ${fmtDate(p.fechaFinBase)}">${dev > 0 ? '+' : ''}${dev} d</span>` : ''}${inc ? `<span class="dev late">${inc} incid.</span>` : ''}${+p.saldo > 0 ? `<span class="dev">Saldo ${MXN.format(p.saldo).replace(/\.\d+$/, '')}</span>` : ''}</div>
+      <div class="pc-dates"><span>${ICON.cal}${p.fechaInicio ? fmtShort(p.fechaInicio) : '—'} → ${p.fechaFin ? fmtShort(p.fechaFin) : '—'}</span>${dev ? `<span class="dev ${dev > 0 ? 'late' : ''}" title="Contra la fecha original ${fmtDate(p.fechaFinBase)}">${dev > 0 ? '+' : ''}${dev} d</span>` : ''}${inc ? `<span class="dev late">${inc} incid.</span>` : ''}${projSaldo(p).n ? `<span class="dev">Saldo ${fmtSaldo(projSaldo(p)).replace(/\.\d+(?= |$)/g, '')}</span>` : ''}</div>
     </article>`;
   }).join('') : `<div class="empty" style="grid-column:1/-1">${ICON.folder}<b>Sin proyectos</b>${all.length ? 'Nada coincide con el filtro.' : 'Crea el primero o conviértelo desde un presupuesto aprobado.'}</div>`;
 }
@@ -2304,9 +2379,9 @@ function renderProjectDetail(stage, p) {
           <div class="card-h"><h2>Datos comerciales</h2></div>
           <div class="kv">
             <div><span>Origen</span><b>${esc(p.origen || '—')}</b></div>
-            <div><span>Saldo pendiente</span><b class="${+p.saldo > 0 ? '' : 'muted'}">${MXN.format(+p.saldo || 0)}</b></div>
+            <div><span>Saldo pendiente</span><b class="${projSaldo(p).n ? '' : 'muted'}">${fmtSaldo(projSaldo(p))}</b><small class="meta-line">${projSaldo(p).n ? `Suma de ${projSaldo(p).n} presupuesto${projSaldo(p).n === 1 ? '' : 's'} vinculado${projSaldo(p).n === 1 ? '' : 's'}` : 'Sin presupuestos vinculados'}</small></div>
           </div>
-          <div class="chips" style="margin-top:12px">${(p.servicios || []).map(x => `<span class="chip ${svcClass(x)}">${esc(x)}</span>`).join('') || '<span class="meta-line">Sin servicios registrados.</span>'}</div>
+          ${+p.saldo > 0 ? `<p class="meta-line" style="margin:10px 0 0">Saldo capturado antes de la migración: ${MXN.format(p.saldo)} (solo referencia; se conciliará en Cobranza).</p>` : ''}
         </div>
         <div class="card">
           <div class="card-h"><h2>Equipo</h2></div>
@@ -2331,7 +2406,7 @@ function renderProjectDetail(stage, p) {
       } }]);
     if (a === 'ovrset') { const v = parseFloat($('#ovrVal').value); if (isNaN(v) || v < 0 || v > 100) return toast('Escribe un % entre 0 y 100', true); p.avanceManual = Math.round(v); toast('Avance fijado manualmente'); return save(); }
     if (a === 'ovrreset') { p.avanceManual = null; toast('Avance restablecido a calculado'); return save(); }
-    if (a === 'sysadd') return promptDialog('Nuevo sistema', 'Nombre (ej. CCTV, Audio, Redes)').then(n => { if (!n) return; (p.sistemas = p.sistemas || []).push({ id: uid(), nombre: n, avanceManual: null }); save(); });
+    if (a === 'sysadd') return sistemaPicker((p.sistemas || []).map(x => x.nombre), names => { p.sistemas = p.sistemas || []; names.forEach(n => p.sistemas.push({ id: uid(), nombre: n, avanceManual: null })); save(); });
     if (a === 'pcard') return cardForm(null, Store.data.board.columns[0].id, { proyectoId: p.id });
     const sm = e.target.closest('[data-sysmenu]');
     if (sm) {
@@ -2355,10 +2430,30 @@ function renderProjectDetail(stage, p) {
     if (ik !== undefined) { const set = new Set(p.resueltas || []); e.target.checked ? set.add(ik) : set.delete(ik); p.resueltas = [...set]; save(); }
   });
 }
+/* Agregar sistemas desde la lista (catálogo); admin puede editar la lista */
+function sistemaPicker(existing, onAdd) {
+  const have = new Set(existing.map(normKey));
+  const sel = new Set();
+  openModal({
+    title: 'Agregar sistemas', size: 'narrow',
+    body: `<p class="meta-line">Elige uno o varios. Con ellos se mide el avance del proyecto.</p><div class="toggle-chips" id="sysPick"></div>
+      ${isAdmin() ? `<button type="button" class="btn sm ghost" data-catsys style="align-self:flex-start">${ICON.edit}Editar lista de sistemas</button>` : ''}`,
+    foot: `<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>Agregar</button>`,
+    onMount(m, close) {
+      const draw = () => {
+        const opts = catList('sistemas').filter(x => !have.has(normKey(x)));
+        m.querySelector('#sysPick').innerHTML = opts.map(x => `<button type="button" class="tchip ${sel.has(x) ? 'on' : ''}" data-sys="${esc(x)}">${esc(x)}</button>`).join('') || '<span class="meta-line">Todos los sistemas de la lista ya están en el proyecto.</span>';
+      };
+      draw();
+      m.querySelector('#sysPick').onclick = e => { const b = e.target.closest('[data-sys]'); if (!b) return; sel.has(b.dataset.sys) ? sel.delete(b.dataset.sys) : sel.add(b.dataset.sys); b.classList.toggle('on'); };
+      m.querySelector('[data-catsys]')?.addEventListener('click', () => catalogManager('sistemas', 'Lista de sistemas', draw));
+      m.querySelector('[data-save]').onclick = () => { if (!sel.size) return toast('Elige al menos un sistema', true); close(); onAdd([...sel]); };
+    }
+  });
+}
 function projectForm(p, prefill) {
   const isNew = !p;
   p = p ? { ...p } : { codigo: nextProjectCode(), nombre: '', clienteId: '', obra: '', direccion: '', responsable: userName(), equipo: [], estatus: 'por_iniciar', fechaInicio: todayISO(), fechaFin: '', notas: '', sistemas: [], presupuestoIds: [], origen: '', servicios: [], saldo: 0, ...(prefill || {}) };
-  const svc = new Set(p.servicios || []);
   const origFin = isNew ? '' : (p.fechaFin || '');
   const eq = new Set(p.equipo || []);
   const clientes = [...Store.data.clientes].sort((a, b) => a.nombre.localeCompare(b.nombre));
@@ -2373,8 +2468,7 @@ function projectForm(p, prefill) {
       <div class="field"><label>Estatus</label><select class="input" name="estatus">${PEST.map(s => `<option value="${s.k}" ${p.estatus === s.k ? 'selected' : ''}>${s.l}</option>`).join('')}</select></div>
       <div class="field span2"><label>Dirección del proyecto</label><input class="input" name="direccion" value="${esc(p.direccion)}"></div>
       <div class="field"><label>Origen</label><select class="input" name="origen"><option value="">Seleccionar…</option>${ORIGENES.map(o => `<option ${p.origen === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>
-      <div class="field"><label>Saldo pendiente (MXN)</label><input class="input" name="saldo" type="number" min="0" step="0.01" inputmode="decimal" value="${+p.saldo || 0}"></div>
-      <div class="field span2"><label>Servicios contratados</label><div class="toggle-chips" id="svcChipsP">${SERVICIOS.map(x => `<button type="button" class="tchip ${svc.has(x) ? 'on' : ''}" data-s="${esc(x)}">${esc(x)}</button>`).join('')}</div></div>
+      <div class="field"><label>Saldo pendiente</label><div class="ro-line">${isNew ? 'Se calcula con los presupuestos vinculados' : fmtSaldo(projSaldo(p))}</div></div>
       <div class="field"><label>Inicio</label><input class="input" type="date" name="fechaInicio" value="${esc(p.fechaInicio)}"></div>
       <div class="field"><label>Fin comprometido</label><input class="input" type="date" name="fechaFin" value="${esc(p.fechaFin)}">${p.fechaFinBase ? `<small class="meta-line">Fecha original: ${fmtDate(p.fechaFinBase)}</small>` : ''}</div>
       <div class="field span2 reprog-box" id="reprogBox" hidden>
@@ -2382,9 +2476,9 @@ function projectForm(p, prefill) {
         <div class="seg" id="origSeg"><button type="button" data-o="Cliente" class="on">Por el cliente</button><button type="button" data-o="Interno">Interno</button></div>
         <input class="input" name="motivo" placeholder="Motivo del cambio (requerido)" maxlength="200" style="margin-top:8px">
       </div>
-      <div class="field"><label>Responsable</label><input class="input" name="responsable" list="eqList" value="${esc(p.responsable)}"><datalist id="eqList">${Store.data.config.equipo.map(n => `<option value="${esc(n)}">`).join('')}</datalist></div>
-      <div class="field"><label>Equipo asignado</label><div class="toggle-chips" id="eqChips">${Store.data.config.equipo.map(n => `<button type="button" class="tchip ${eq.has(n) ? 'on' : ''}" data-n="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>
-      ${isNew ? `<div class="field span2"><label>Sistemas (separados por coma)</label><input class="input" name="sistemasTxt" value="${esc((p.sistemas || []).map(s => s.nombre).join(', '))}" placeholder="CCTV, Audio, Redes, Automatización"></div>` : ''}
+      <div class="field"><label>Responsable</label><input class="input" name="responsable" list="eqList" value="${esc(p.responsable)}"><datalist id="eqList">${teamNames().map(n => `<option value="${esc(n)}">`).join('')}</datalist></div>
+      <div class="field"><label>Equipo asignado</label><div class="toggle-chips" id="eqChips">${teamNames().map(n => `<button type="button" class="tchip ${eq.has(n) ? 'on' : ''}" data-n="${esc(n)}">${esc(n)}</button>`).join('')}</div></div>
+      ${isNew ? `<div class="field span2"><label>Sistemas del proyecto <span class="meta-line">(con ellos se mide el avance)</span></label><div style="display:flex;gap:8px;align-items:flex-start"><div class="toggle-chips" id="sysChipsNew" style="flex:1"></div>${isAdmin() ? `<button type="button" class="icon-btn" data-catsys title="Editar lista de sistemas (admin)" style="border:1px solid var(--line);flex:none">${ICON.edit}</button>` : ''}</div></div>` : ''}
       <div class="field span2"><label>Notas</label><textarea class="input" name="notas" rows="3">${esc(p.notas)}</textarea></div>
     </div>`,
     foot: `<button class="btn" data-x>Cancelar</button><button class="btn primary" data-save>${ICON.save}${isNew ? 'Crear proyecto' : 'Guardar'}</button>`,
@@ -2393,7 +2487,11 @@ function projectForm(p, prefill) {
       const chk = () => { m.querySelector('#reprogBox').hidden = !(origFin && f('fechaFin').value && f('fechaFin').value !== origFin); };
       f('fechaFin').addEventListener('change', chk); f('fechaFin').addEventListener('input', chk);
       m.querySelector('#origSeg').onclick = e => { const b = e.target.closest('[data-o]'); if (!b) return; origen = b.dataset.o; $$('#origSeg button', m).forEach(x => x.classList.toggle('on', x === b)); };
-      m.querySelector('#svcChipsP').onclick = e => { const b = e.target.closest('[data-s]'); if (!b) return; b.classList.toggle('on'); svc.has(b.dataset.s) ? svc.delete(b.dataset.s) : svc.add(b.dataset.s); };
+      const sysSel = new Set((p.sistemas || []).map(x => x.nombre));
+      const drawSys = () => { const box = m.querySelector('#sysChipsNew'); if (!box) return; const all = [...new Set([...catList('sistemas'), ...sysSel])]; box.innerHTML = all.map(x => `<button type="button" class="tchip ${sysSel.has(x) ? 'on' : ''}" data-sys="${esc(x)}">${esc(x)}</button>`).join(''); };
+      drawSys();
+      m.querySelector('#sysChipsNew')?.addEventListener('click', e => { const b = e.target.closest('[data-sys]'); if (!b) return; sysSel.has(b.dataset.sys) ? sysSel.delete(b.dataset.sys) : sysSel.add(b.dataset.sys); b.classList.toggle('on'); });
+      m.querySelector('[data-catsys]')?.addEventListener('click', () => catalogManager('sistemas', 'Lista de sistemas', drawSys));
       m.querySelector('#eqChips').onclick = e => { const b = e.target.closest('[data-n]'); if (!b) return; b.classList.toggle('on'); eq.has(b.dataset.n) ? eq.delete(b.dataset.n) : eq.add(b.dataset.n); };
       m.querySelector('[data-save]').onclick = () => {
         const nombre = f('nombre').value.trim(), clienteId = f('clienteId').value;
@@ -2404,10 +2502,10 @@ function projectForm(p, prefill) {
         const changed = origFin && ff && ff !== origFin;
         if (changed && !f('motivo').value.trim()) { f('motivo').classList.add('invalid'); f('motivo').focus(); return toast('Escribe el motivo del cambio de fecha', true); }
         const c = Store.data.clientes.find(x => x.id === clienteId);
-        const rec = { nombre, clienteId, clienteNombre: c ? c.nombre : '', codigo: f('codigo').value.trim() || nextProjectCode(), obra: f('obra').value.trim(), estatus: f('estatus').value, direccion: f('direccion').value.trim(), fechaInicio: fi, fechaFin: ff, responsable: f('responsable').value.trim(), equipo: [...eq], notas: f('notas').value.trim(), origen: f('origen').value, saldo: Math.max(0, parseFloat(f('saldo').value) || 0), servicios: SERVICIOS.filter(x => svc.has(x)), updated: new Date().toISOString() };
+        const rec = { nombre, clienteId, clienteNombre: c ? c.nombre : '', codigo: f('codigo').value.trim() || nextProjectCode(), obra: f('obra').value.trim(), estatus: f('estatus').value, direccion: f('direccion').value.trim(), fechaInicio: fi, fechaFin: ff, responsable: f('responsable').value.trim(), equipo: [...eq], notas: f('notas').value.trim(), origen: f('origen').value, updated: new Date().toISOString() };
         let target;
         if (isNew) {
-          const sis = (f('sistemasTxt').value || '').split(',').map(x => x.trim()).filter(Boolean).map(n => ({ id: uid(), nombre: n, avanceManual: null }));
+          const sis = [...sysSel].map(n => ({ id: uid(), nombre: n, avanceManual: null }));
           target = { id: uid(), created: new Date().toISOString(), createdBy: ME.username, avanceManual: null, resueltas: [], reprogramaciones: [], presupuestoIds: p.presupuestoIds || [], ...rec, sistemas: sis, fechaFinBase: ff || '' };
           Store.data.proyectos.unshift(target);
           (target.presupuestoIds || []).forEach(id => { const b = Store.data.presupuestos.find(x => x.id === id); if (b) b.proyectoId = target.id; });
@@ -2459,14 +2557,15 @@ function monitorData() {
     const exp = new Date(parseD(b.fecha)); exp.setDate(exp.getDate() + vigenciaDias(b.data && b.data.vigencia));
     return { b, dias: daysBetween(t, localISO(exp)) };
   }).filter(x => x.dias >= 0 && x.dias <= 7);
-  const porCobrar = isSchema2() ? Store.data.proyectos.reduce((a, p) => a + (+p.saldo || 0), 0) : Store.data.clientes.reduce((a, c) => a + (+c.saldo || 0), 0);
+  const pcT = { MXN: 0, USD: 0 }; Store.data.proyectos.forEach(p => { const x = projSaldo(p); pcT.MXN += x.MXN; pcT.USD += x.USD; });
+  const porCobrar = pcT.MXN, porCobrarUSD = pcT.USD;
   const avgProg = enCurso.length ? Math.round(enCurso.reduce((a, p) => a + projProgress(p).value, 0) / enCurso.length) : 0;
   const alerts = [];
   activos.forEach(p => { const h = projHealth(p); if (h.k === 'bad' || h.k === 'warn') alerts.push({ lvl: h.k, t: p.nombre, d: h.l, go: () => openProject(p.id) }); });
   activos.forEach(p => { if (p.estatus === 'en_curso') { const last = projCards(p.id).reduce((a, x) => (x.card.updated || x.card.created || '') > a ? (x.card.updated || x.card.created || '') : a, p.updated || p.created || ''); if (last && daysBetween(localISO(new Date(last)), t) > 10) alerts.push({ lvl: 'warn', t: p.nombre, d: `Sin movimiento hace ${daysBetween(localISO(new Date(last)), t)} días`, go: () => openProject(p.id) }); } });
   vencidas.slice(0, 20).forEach(x => alerts.push({ lvl: 'bad', t: x.card.title, d: `Actividad vencida (${fmtShort(x.card.fecha)}) · ${x.col.name}`, go: () => openCard(x.card.id) }));
   porVencer.forEach(x => alerts.push({ lvl: 'warn', t: x.b.folio, d: x.dias === 0 ? 'Presupuesto vence hoy' : `Presupuesto vence en ${x.dias} día${x.dias > 1 ? 's' : ''}`, go: () => openBudget(x.b.id) }));
-  return { activos, enCurso, vencidas, hoy, porVencer, porCobrar, avgProg, alerts };
+  return { activos, enCurso, vencidas, hoy, porVencer, porCobrar, porCobrarUSD, avgProg, alerts };
 }
 function renderMonitor(stage) {
   stage.innerHTML = `<section id="monitor" class="monitor"></section>`;
@@ -2491,7 +2590,7 @@ function drawMonitor() {
       <div class="kpi"><small>Avance promedio</small><b>${D.avgProg}%</b><span>proyectos en curso</span></div>
       <div class="kpi ${D.vencidas.length ? 'bad' : ''}"><small>Actividades vencidas</small><b>${D.vencidas.length}</b><span>sin marcar como Lista</span></div>
       <div class="kpi ${D.porVencer.length ? 'warn' : ''}"><small>Presupuestos por vencer</small><b>${D.porVencer.length}</b><span>próximos 7 días</span></div>
-      <div class="kpi"><small>Por cobrar</small><b>$${AGIS_money(D.porCobrar).replace(/\.\d+$/, '')}</b><span>saldo de proyectos</span></div>
+      <div class="kpi"><small>Por cobrar</small><b>$${AGIS_money(D.porCobrar).replace(/\.\d+$/, '')}</b><span>${D.porCobrarUSD ? '+ US$' + AGIS_money(D.porCobrarUSD).replace(/\.\d+$/, '') + ' · ' : ''}presupuestos vinculados</span></div>
     </div>
     <div class="mon-grid">
       <div class="mon-projects">${D.activos.length ? D.activos.map(p => {
@@ -2552,7 +2651,8 @@ const OBS_DEFAULT = [
 ];
 const SECCIONES_DEF = ['Equipos', 'Accesorios', 'Cableados', 'Mano de Obra', 'Programación', 'Visita Técnica'];
 const UNIDADES_DEF = ['Pieza', 'Lote', 'Metros', 'Bobina'];
-const catList = k => (Store.data.catalogos && Array.isArray(Store.data.catalogos[k]) ? Store.data.catalogos[k] : (k === 'secciones' ? SECCIONES_DEF : UNIDADES_DEF));
+const CAT_DEF = { secciones: SECCIONES_DEF, unidades: UNIDADES_DEF, sistemas: SERVICIOS };
+const catList = k => (Store.data.catalogos && Array.isArray(Store.data.catalogos[k]) ? Store.data.catalogos[k] : CAT_DEF[k] || []);
 const r2 = n => Math.round((+n || 0) * 100) / 100;
 /* Precio unitario = (Costo + Mano de obra) × (1 + Indirectos %) × (1 + Margen %) */
 function calcPU(p) { return r2(((+p.costo || 0) + (+p.manoObra || 0)) * (1 + (+p.indirectos || 0) / 100) * (1 + (+p.margen || 0) / 100)); }
@@ -2598,7 +2698,25 @@ function newBudget() {
     observaciones: [...OBS_DEFAULT], banco: { ...BANK }, director: 'ING. ISAAC SHTURMAN', savedId: null
   };
 }
-let PB = null;
+let PB = null, budgetSnap = '';
+const budgetDirty = () => !!PB && JSON.stringify(PB) !== budgetSnap;
+const snapBudget = () => { budgetSnap = PB ? JSON.stringify(PB) : ''; };
+/* Si hay cambios sin guardar en el presupuesto, pregunta antes de salir */
+function guardBudget(cb) {
+  if (current !== 'presupuesto' || !budgetDirty()) return cb();
+  let went = false;
+  openModal({
+    title: 'Cambios sin guardar', size: '',
+    onClose: () => { if (!went && current === 'presupuesto' && location.hash !== '#presupuesto') { try { history.replaceState(null, '', '#presupuesto'); } catch (e) {} } },
+    body: `<p>El presupuesto <b>${esc(PB.folio || PB.titulo || 'en edición')}</b> tiene cambios que no se han guardado.</p>`,
+    foot: `<button class="btn danger left" data-discard>Descartar cambios</button><button class="btn" data-x>Cancelar</button><button class="btn primary" data-savego>${ICON.save}Guardar y continuar</button>`,
+    onMount(m, close) {
+      m.querySelector('[data-discard]').onclick = () => { went = true; close(); snapBudget(); cb(); };
+      m.querySelector('[data-savego]').onclick = () => { went = true; close(); setTimeout(() => { if (saveBudget(true)) cb(); else if (location.hash !== '#presupuesto') { try { history.replaceState(null, '', '#presupuesto'); } catch (e) {} } }, 190); };
+    }
+  });
+}
+window.addEventListener('beforeunload', e => { if (current === 'presupuesto' && budgetDirty()) { e.preventDefault(); e.returnValue = ''; } });
 function loadBudgetDraft() {
   try { const s = localStorage.getItem('agis-budget-draft'); if (s) { const b = { ...newBudget(), ...JSON.parse(s) }; if (!b.savedId) b.fecha = todayISO(); return b; } } catch (_) {}
   return newBudget();
@@ -2612,7 +2730,7 @@ function suggestBudgetFolio() {
   return `${pre}${String(n).padStart(3, '0')}_Rev.${PB.rev || 0}`;
 }
 function renderPresupuesto(stage) {
-  if (!PB) PB = loadBudgetDraft();
+  if (!PB) { PB = newBudget(); snapBudget(); }
   const clientes = [...Store.data.clientes].sort((a, b) => a.nombre.localeCompare(b.nombre));
   stage.innerHTML = `
   <section id="presupuesto" class="rep-layout">
@@ -2855,7 +2973,7 @@ function saveBudget(notify) {
   PB.savedId = rec.id; rec.data = { ...PB };
   const i = Store.data.presupuestos.findIndex(x => x.id === rec.id);
   if (i >= 0) Store.data.presupuestos[i] = rec; else Store.data.presupuestos.unshift(rec);
-  Store.save('presupuestos'); saveBudgetDraft(); drawBudgets();
+  Store.save('presupuestos'); saveBudgetDraft(); drawBudgets(); snapBudget();
   if (notify) toast('Presupuesto guardado');
   return true;
 }
@@ -2875,8 +2993,7 @@ async function generateBudgetPDF() {
   finally { budBusy = false; if (btn) { btn.disabled = false; btn.lastChild.textContent = 'Generar PDF'; } }
 }
 async function resetBudget() {
-  if (!await confirmDialog('Nuevo presupuesto', 'Se limpiará el formulario actual. Si no lo guardaste, se perderá.', 'Limpiar', false)) return;
-  PB = newBudget(); saveBudgetDraft(); renderPresupuesto($('#stage'));
+  guardBudget(() => { PB = newBudget(); snapBudget(); saveBudgetDraft(); renderPresupuesto($('#stage')); });
 }
 function drawBudgets() {
   const el = $('#budList'); if (!el) return;
@@ -2889,18 +3006,21 @@ function drawBudgets() {
 }
 function openBudget(id) {
   const b = Store.data.presupuestos.find(x => x.id === id); if (!b || !b.data) return toast('El presupuesto ya no existe', true);
-  PB = { ...newBudget(), ...b.data, savedId: b.id }; saveBudgetDraft();
-  if (current === 'presupuesto') renderPresupuesto($('#stage')); else go('presupuesto');
-  toast('Presupuesto abierto: ' + (b.folio || ''));
+  const doOpen = () => {
+    PB = { ...newBudget(), ...b.data, savedId: b.id }; snapBudget(); saveBudgetDraft();
+    if (current === 'presupuesto') renderPresupuesto($('#stage')); else go('presupuesto', { keepBudget: true });
+    toast('Presupuesto abierto: ' + (b.folio || ''));
+  };
+  if (current === 'presupuesto' && PB && PB.savedId !== id) guardBudget(doOpen); else if (current === 'presupuesto' && PB && PB.savedId === id) { renderPresupuesto($('#stage')); } else doOpen();
 }
 function budgetMenu(btn) {
   const id = btn.dataset.bmore, b = Store.data.presupuestos.find(x => x.id === id);
   popMenu(btn, [
     { label: 'Abrir / editar', icon: 'open', run: () => openBudget(id) },
     { label: 'Descargar PDF', icon: 'download', run: async () => { try { (await makeBudgetPDF(b.data)).save(budgetFile(b.folio)); } catch (e) { toast(e.message || 'Error al generar el PDF', true); } } },
-    ...(can('proyectos') ? [{ label: b.proyectoId && Store.data.proyectos.some(x => x.id === b.proyectoId) ? 'Ver proyecto' : 'Convertir en proyecto', icon: 'folder', run: () => projectFromBudget(b) }] : []),
-    { label: 'Nueva revisión', icon: 'copy', run: () => { const rev = (+b.data.rev || 0) + 1; PB = { ...newBudget(), ...b.data, savedId: null, rev, fecha: todayISO(), folio: String(b.data.folio || '').replace(/_Rev\.\d+$/, '') + '_Rev.' + rev }; saveBudgetDraft(); renderPresupuesto($('#stage')); toast('Revisión ' + rev + ' lista para editar'); } },
-    { label: 'Duplicar como nuevo', icon: 'copy', run: () => { PB = { ...newBudget(), ...b.data, savedId: null, rev: 0, folio: '', fecha: todayISO(), clienteId: '', clienteNombre: '', obra: '' }; saveBudgetDraft(); renderPresupuesto($('#stage')); } },
+    ...(can('proyectos') ? [{ label: b.proyectoId && Store.data.proyectos.some(x => x.id === b.proyectoId) ? 'Ver proyecto' : 'Convertir en proyecto', icon: 'folder', run: () => guardBudget(() => projectFromBudget(b)) }] : []),
+    { label: 'Nueva revisión', icon: 'copy', run: () => guardBudget(() => { const rev = (+b.data.rev || 0) + 1; PB = { ...newBudget(), ...b.data, savedId: null, rev, fecha: todayISO(), folio: String(b.data.folio || '').replace(/_Rev\.\d+$/, '') + '_Rev.' + rev }; budgetSnap = ''; saveBudgetDraft(); renderPresupuesto($('#stage')); toast('Revisión ' + rev + ' lista para editar'); }) },
+    { label: 'Duplicar como nuevo', icon: 'copy', run: () => guardBudget(() => { PB = { ...newBudget(), ...b.data, savedId: null, rev: 0, folio: '', fecha: todayISO(), clienteId: '', clienteNombre: '', obra: '' }; budgetSnap = ''; saveBudgetDraft(); renderPresupuesto($('#stage')); }) },
     '-',
     { label: 'Eliminar', icon: 'trash', danger: true, run: async () => { if (!await confirmDialog('Eliminar presupuesto', `¿Eliminar <b>${esc(b.folio)}</b>?`)) return; Store.data.presupuestos = Store.data.presupuestos.filter(x => x.id !== id); if (PB && PB.savedId === id) PB.savedId = null; Store.save('presupuestos'); drawBudgets(); } }
   ]);
@@ -3066,6 +3186,11 @@ function showLogin(msg, prefill = '') {
 }
 /* ================= Notificaciones (campana) ================= */
 let NOTIFS = [], notifTimer = null;
+let DIR_CACHE = [];
+async function loadDirectory() {
+  try { DIR_CACHE = (await Api.directory()).filter(u => u.role === 'admin' || (u.modules || []).includes('actividades')).sort((a, b) => String(a.name).localeCompare(String(b.name))); } catch (e) {}
+  return DIR_CACHE;
+}
 function timeAgo(iso) {
   const s = (Date.now() - new Date(iso)) / 1000;
   if (s < 60) return 'Hace un momento';
@@ -3118,6 +3243,7 @@ async function onNotifClick(e) {
 }
 async function openCard(id) {
   if (!can('actividades')) return toast('No tienes acceso a Actividades', true);
+  if (current === 'presupuesto' && budgetDirty()) return guardBudget(() => openCard(id));
   try { await Store.reload(); } catch (e) {}
   go('actividades');
   const { col, card } = findCard(id);
@@ -3141,8 +3267,8 @@ function userMenu(anchor) {
   popMenu(anchor, [
     { header: `<b>${esc(ME.name || ME.username)}</b><small>@${esc(ME.username)} · ${esc(ROLE_LABEL[ME.role] || '')}</small>` },
     ...(isAdmin() ? [{ label: 'Administrar usuarios', icon: 'shield', run: () => go('usuarios') }, '-'] : []),
-    { label: 'Cambiar de usuario', icon: 'swap', run: () => logout('Inicia sesión con otra cuenta.') },
-    { label: 'Cerrar sesión', icon: 'logout', danger: true, run: () => logout('Sesión cerrada.') }
+    { label: 'Cambiar de usuario', icon: 'swap', run: () => guardBudget(() => logout('Inicia sesión con otra cuenta.')) },
+    { label: 'Cerrar sesión', icon: 'logout', danger: true, run: () => guardBudget(() => logout('Sesión cerrada.')) }
   ]);
 }
 async function logout(msg) {
@@ -3160,6 +3286,7 @@ async function startApp(me) {
   migrateData();
   renderUserChip();
   startNotifs();
+  loadDirectory();
   buildBand();
   R = null; PB = null; PS.view = 'list';
   const h = location.hash.slice(1);
